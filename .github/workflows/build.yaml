@@ -96,7 +96,7 @@ jobs:
 
       - name: Install admin-ui dependencies
         working-directory: admin-ui
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Build admin-ui
         working-directory: admin-ui
