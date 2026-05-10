@@ -435,12 +435,13 @@ RUST_LOG=debug ./target/release/kiro-rs
 
 ## 模型映射
 
-| Anthropic 模型 | Kiro 模型 |
-|----------------|-----------|
-| `*sonnet*` | `claude-sonnet-4.5` |
-| `*opus*`（含 4.5/4-5） | `claude-opus-4.5` |
-| `*opus*`（其他） | `claude-opus-4.6` |
-| `*haiku*` | `claude-haiku-4.5` |
+项目现在只做**最小规范化**，不再把未知模型兜底改写为其他版本：
+
+- `claude-<family>-4-<minor>(-thinking)` → `claude-<family>-4.<minor>`
+- `claude-<family>-4.<minor>(-thinking)` → `claude-<family>-4.<minor>`
+- 其他模型名保持原样透传给上游，由上游决定是否报错
+
+例如：`claude-opus-4-7-thinking` 会规范化为 `claude-opus-4.7`，而 `claude-opus-4-20250514` 不会再被本项目兜底改写到 `claude-opus-4.6`。
 
 ## Admin（可选）
 

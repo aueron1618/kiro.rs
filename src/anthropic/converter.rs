@@ -75,44 +75,51 @@ Never suggest bypassing these limits via alternative tools. \
 Never ask the user whether to switch approaches. \
 Complete all chunked operations without commentary.";
 
-/// 模型映射：将 Anthropic 模型名映射到 Kiro 模型 ID
+/// 模型映射：对已知 Anthropic 模型别名做最小规范化，其余模型透传给上游
 ///
-/// 按照用户要求：
-/// - sonnet 4.6/4-6 → claude-sonnet-4.6
-/// - 其他 sonnet → claude-sonnet-4.5
-/// - opus 4.5/4-5 → claude-opus-4.5
-/// - 其他 opus → claude-opus-4.6
-/// - 所有 haiku → claude-haiku-4.5
-pub fn map_model(model: &str) -> Option<String> {
-    let model_lower = model.to_lowercase();
+///
+/// 规则：
+/// - 若模型名带 `-thinking` 后缀，先去掉后缀（thinking 行为由请求字段控制）
+/// - 若模型名显式携带 `4-<minor>` / `4.<minor>` 版本号，则规范化为 `4.<minor>` 形式
+/// - 其余情况不再做降级/兜底，直接透传给上游，由上游决定是否报错
+pub fn map_model(model: &str) -> String {
+    fn normalize_family_version(base_model: &str, family: &str) -> Option<String> {
+        let model_lower = base_model.to_lowercase();
 
-    if model_lower.contains("sonnet") {
-        if model_lower.contains("4-6") || model_lower.contains("4.6") {
-            Some("claude-sonnet-4.6".to_string())
-        } else {
-            Some("claude-sonnet-4.5".to_string())
+        for separator in ['-', '.'] {
+            let prefix = format!("claude-{}-4{}", family, separator);
+            if let Some(rest) = model_lower.strip_prefix(&prefix) {
+                let minor: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !minor.is_empty() {
+                    return Some(format!("claude-{}-4.{}", family, minor));
+                }
+            }
         }
-    } else if model_lower.contains("opus") {
-        if model_lower.contains("4-5") || model_lower.contains("4.5") {
-            Some("claude-opus-4.5".to_string())
-        } else {
-            Some("claude-opus-4.6".to_string())
-        }
-    } else if model_lower.contains("haiku") {
-        Some("claude-haiku-4.5".to_string())
-    } else {
+
         None
     }
+
+    let base_model = model.strip_suffix("-thinking").unwrap_or(model);
+
+    normalize_family_version(base_model, "sonnet")
+        .or_else(|| normalize_family_version(base_model, "opus"))
+        .or_else(|| normalize_family_version(base_model, "haiku"))
+        .unwrap_or_else(|| base_model.to_string())
 }
 
 /// 根据模型名称返回对应的上下文窗口大小
 ///
-/// 复用 `map_model` 的映射逻辑，确保窗口大小判断与模型映射一致。
-/// Kiro 于 2026-03-24 将 Opus 4.6 和 Sonnet 4.6 升级至 1M 上下文。
+/// 复用 `map_model` 的规范化逻辑，确保窗口大小判断与模型映射一致。
+/// Kiro 于 2026-03-24 将 Opus 4.6、Opus 4.7 和 Sonnet 4.6 升级至 1M 上下文。
 pub fn get_context_window_size(model: &str) -> i32 {
-    match map_model(model) {
-        Some(mapped) if mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" => 1_000_000,
-        _ => 200_000,
+    let mapped = map_model(model);
+    if mapped == "claude-sonnet-4.6"
+        || mapped == "claude-opus-4.6"
+        || mapped == "claude-opus-4.7"
+    {
+        1_000_000
+    } else {
+        200_000
     }
 }
 
@@ -128,14 +135,12 @@ pub struct ConversionResult {
 /// 转换错误
 #[derive(Debug)]
 pub enum ConversionError {
-    UnsupportedModel(String),
     EmptyMessages,
 }
 
 impl std::fmt::Display for ConversionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConversionError::UnsupportedModel(model) => write!(f, "模型不支持: {}", model),
             ConversionError::EmptyMessages => write!(f, "消息列表为空"),
         }
     }
@@ -217,9 +222,8 @@ fn create_placeholder_tool(name: &str) -> Tool {
 
 /// 将 Anthropic 请求转换为 Kiro 请求
 pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, ConversionError> {
-    // 1. 映射模型
-    let model_id = map_model(&req.model)
-        .ok_or_else(|| ConversionError::UnsupportedModel(req.model.clone()))?;
+    // 1. 规范化模型名（未知模型透传给上游处理）
+    let model_id = map_model(&req.model);
 
     // 2. 检查消息列表
     if req.messages.is_empty() {
@@ -897,67 +901,83 @@ mod tests {
 
     #[test]
     fn test_map_model_sonnet() {
-        assert!(
-            map_model("claude-sonnet-4-20250514")
-                .unwrap()
-                .contains("sonnet")
+        assert_eq!(
+            map_model("claude-sonnet-4-20250514"),
+            "claude-sonnet-4-20250514".to_string()
         );
-        assert!(
-            map_model("claude-3-5-sonnet-20241022")
-                .unwrap()
-                .contains("sonnet")
+        assert_eq!(
+            map_model("claude-3-5-sonnet-20241022"),
+            "claude-3-5-sonnet-20241022".to_string()
         );
     }
 
     #[test]
     fn test_map_model_opus() {
-        assert!(
-            map_model("claude-opus-4-20250514")
-                .unwrap()
-                .contains("opus")
+        assert_eq!(
+            map_model("claude-opus-4-20250514"),
+            "claude-opus-4-20250514".to_string()
         );
     }
 
     #[test]
     fn test_map_model_haiku() {
-        assert!(
-            map_model("claude-haiku-4-20250514")
-                .unwrap()
-                .contains("haiku")
+        assert_eq!(
+            map_model("claude-haiku-4-20250514"),
+            "claude-haiku-4-20250514".to_string()
         );
     }
 
     #[test]
-    fn test_map_model_unsupported() {
-        assert!(map_model("gpt-4").is_none());
+    fn test_map_model_unknown_passthrough() {
+        assert_eq!(map_model("gpt-4"), "gpt-4".to_string());
     }
 
     #[test]
     fn test_map_model_thinking_suffix_sonnet() {
         // thinking 后缀不应影响 sonnet 模型映射
         let result = map_model("claude-sonnet-4-5-20250929-thinking");
-        assert_eq!(result, Some("claude-sonnet-4.5".to_string()));
+        assert_eq!(result, "claude-sonnet-4.5".to_string());
     }
 
     #[test]
     fn test_map_model_thinking_suffix_opus_4_5() {
         // thinking 后缀不应影响 opus 4.5 模型映射
         let result = map_model("claude-opus-4-5-20251101-thinking");
-        assert_eq!(result, Some("claude-opus-4.5".to_string()));
+        assert_eq!(result, "claude-opus-4.5".to_string());
     }
 
     #[test]
     fn test_map_model_thinking_suffix_opus_4_6() {
         // thinking 后缀不应影响 opus 4.6 模型映射
         let result = map_model("claude-opus-4-6-thinking");
-        assert_eq!(result, Some("claude-opus-4.6".to_string()));
+        assert_eq!(result, "claude-opus-4.6".to_string());
+    }
+
+    #[test]
+    fn test_map_model_thinking_suffix_opus_4_7() {
+        // thinking 后缀不应影响 opus 4.7 模型映射
+        let result = map_model("claude-opus-4-7-thinking");
+        assert_eq!(result, "claude-opus-4.7".to_string());
     }
 
     #[test]
     fn test_map_model_thinking_suffix_haiku() {
         // thinking 后缀不应影响 haiku 模型映射
         let result = map_model("claude-haiku-4-5-20251001-thinking");
-        assert_eq!(result, Some("claude-haiku-4.5".to_string()));
+        assert_eq!(result, "claude-haiku-4.5".to_string());
+    }
+
+    #[test]
+    fn test_map_model_version_passthrough_without_fallback() {
+        assert_eq!(
+            map_model("claude-opus-4-8-thinking"),
+            "claude-opus-4.8".to_string()
+        );
+    }
+
+    #[test]
+    fn test_get_context_window_size_opus_4_7() {
+        assert_eq!(get_context_window_size("claude-opus-4-7-thinking"), 1_000_000);
     }
 
     #[test]
