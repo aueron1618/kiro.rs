@@ -8,11 +8,12 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { CredentialCard } from '@/components/credential-card'
 import { BalanceDialog } from '@/components/balance-dialog'
+import { Switch } from '@/components/ui/switch'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useAutoContinueConfig, useSetAutoContinueConfig } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -54,6 +55,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+  const { data: autoContinueData, isLoading: isLoadingAutoContinue } = useAutoContinueConfig()
+  const { mutate: setAutoContinueConfig, isPending: isSettingAutoContinue } = useSetAutoContinueConfig()
 
   // 计算分页
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
@@ -507,6 +510,19 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
+  // 切换自动续写开关（后端运行时即时生效）
+  const handleToggleAutoContinue = (enabled: boolean) => {
+    setAutoContinueConfig(enabled, {
+      onSuccess: () => {
+        toast.success(enabled ? '已启用自动续写' : '已关闭自动续写')
+      },
+      onError: (error) => {
+        toast.error(`切换自动续写失败: ${extractErrorMessage(error)}`)
+      }
+    })
+  }
+
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -545,6 +561,15 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <span className="font-semibold">Kiro Admin</span>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 rounded-md border px-3 py-1.5" title="控制后端自动续写功能，切换后即时生效">
+              <span className="text-sm text-muted-foreground whitespace-nowrap">自动续写</span>
+              <Switch
+                checked={autoContinueData?.enabled ?? true}
+                disabled={isLoadingAutoContinue || isSettingAutoContinue}
+                onCheckedChange={handleToggleAutoContinue}
+                aria-label="自动续写开关"
+              />
+            </div>
             <Button
               variant="outline"
               size="sm"

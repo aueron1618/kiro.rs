@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -13,9 +13,11 @@ use crate::kiro::token_manager::MultiTokenManager;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    AddCredentialRequest, AddCredentialResponse, AutoContinueConfigResponse, BalanceResponse,
+    CredentialStatusItem, CredentialsStatusResponse, LoadBalancingModeResponse,
+    SetAutoContinueConfigRequest, SetLoadBalancingModeRequest,
 };
+use crate::{anthropic::RuntimeFlags, model::config::Config};
 
 /// 余额缓存过期时间（秒），5 分钟
 const BALANCE_CACHE_TTL_SECS: i64 = 300;
@@ -33,17 +35,22 @@ struct CachedBalance {
 ///
 /// 封装所有 Admin API 的业务逻辑
 pub struct AdminService {
+    config: Arc<RwLock<Config>>,
     token_manager: Arc<MultiTokenManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
+    /// Anthropic 兼容层运行时开关
+    runtime_flags: Arc<RuntimeFlags>,
 }
 
 impl AdminService {
     pub fn new(
+        config: Arc<RwLock<Config>>,
         token_manager: Arc<MultiTokenManager>,
         known_endpoints: impl IntoIterator<Item = String>,
+        runtime_flags: Arc<RuntimeFlags>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -52,10 +59,12 @@ impl AdminService {
         let balance_cache = Self::load_balance_cache_from(&cache_path);
 
         Self {
+            config,
             token_manager,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
+            runtime_flags,
         }
     }
 
@@ -297,6 +306,54 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
 
         Ok(LoadBalancingModeResponse { mode: req.mode })
+    }
+
+    /// 获取自动续写开关状态
+    pub fn get_auto_continue_config(&self) -> AutoContinueConfigResponse {
+        AutoContinueConfigResponse {
+            enabled: self.runtime_flags.auto_continue_enabled(),
+        }
+    }
+
+    /// 设置自动续写开关（即时生效，并尽量持久化到 config.json）
+    pub fn set_auto_continue_config(
+        &self,
+        req: SetAutoContinueConfigRequest,
+    ) -> Result<AutoContinueConfigResponse, AdminServiceError> {
+        let previous = self.runtime_flags.auto_continue_enabled();
+        if previous == req.enabled {
+            return Ok(AutoContinueConfigResponse { enabled: req.enabled });
+        }
+
+        self.runtime_flags.set_auto_continue_enabled(req.enabled);
+
+        let config_path = self
+            .config
+            .read()
+            .ok()
+            .and_then(|config| config.config_path().map(|path| path.to_path_buf()));
+
+        if let Some(config_path) = config_path {
+            let persist_result = (|| -> anyhow::Result<()> {
+                let mut config = Config::load(config_path)?;
+                config.auto_continue_enabled = req.enabled;
+                config.save()
+            })();
+
+            if let Err(err) = persist_result {
+                self.runtime_flags.set_auto_continue_enabled(previous);
+                return Err(AdminServiceError::InternalError(err.to_string()));
+            }
+
+            if let Ok(mut runtime_config) = self.config.write() {
+                runtime_config.auto_continue_enabled = req.enabled;
+            }
+        } else {
+            tracing::warn!("配置文件路径未知，自动续写开关仅在当前进程生效: {}", req.enabled);
+        }
+
+        tracing::info!("自动续写开关已设置为: {}", req.enabled);
+        Ok(AutoContinueConfigResponse { enabled: req.enabled })
     }
 
     /// 强制刷新指定凭据的 Token

@@ -8,7 +8,7 @@ mod model;
 pub mod token;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use clap::Parser;
 use kiro::endpoint::{IdeEndpoint, KiroEndpoint};
@@ -39,6 +39,8 @@ async fn main() {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    let runtime_config = Arc::new(RwLock::new(config.clone()));
+    let runtime_flags = Arc::new(anthropic::RuntimeFlags::new(config.auto_continue_enabled));
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
@@ -162,6 +164,7 @@ async fn main() {
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
+        runtime_flags.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -177,8 +180,12 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
-            let admin_service =
-                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
+            let admin_service = admin::AdminService::new(
+                runtime_config.clone(),
+                token_manager.clone(),
+                endpoint_names.clone(),
+                runtime_flags.clone(),
+            );
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 

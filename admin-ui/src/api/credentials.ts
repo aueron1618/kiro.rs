@@ -8,6 +8,8 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  AutoContinueConfigResponse,
+  SetAutoContinueConfigRequest,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -102,5 +104,17 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+// 获取自动续写开关
+export async function getAutoContinueConfig(): Promise<AutoContinueConfigResponse> {
+  const { data } = await api.get<AutoContinueConfigResponse>('/config/auto-continue')
+  return data
+}
+
+// 设置自动续写开关
+export async function setAutoContinueConfig(enabled: boolean): Promise<AutoContinueConfigResponse> {
+  const { data } = await api.put<AutoContinueConfigResponse>('/config/auto-continue', { enabled } as SetAutoContinueConfigRequest)
   return data
 }

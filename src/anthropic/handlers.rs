@@ -1,6 +1,7 @@
 //! Anthropic API Handler 函数
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use anyhow::Error;
 use crate::kiro::model::events::Event;
@@ -23,9 +24,91 @@ use uuid::Uuid;
 
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
-use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
-use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
+use super::runtime::RuntimeFlags;
+use super::stream::{AutoContinueSegment, BufferedStreamContext, SseEvent, StreamContext};
+use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, Message, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
 use super::websearch;
+
+/// 单次上游请求耗时小于该阈值时，允许自动续写
+const AUTO_CONTINUE_MAX_DURATION: Duration = Duration::from_secs(4 * 60);
+/// 单次可见输出 tokens 小于该阈值时，允许自动续写
+const AUTO_CONTINUE_MAX_OUTPUT_TOKENS: i32 = 8000;
+/// 自动续写最大轮数，避免异常场景无限循环
+const AUTO_CONTINUE_MAX_ATTEMPTS: usize = 8;
+/// 参考 SillyTavern 的默认 continue nudge
+const AUTO_CONTINUE_NUDGE_PROMPT: &str =
+    "[Continue your last message without repeating its original content.]";
+/// 触发自动续写所需的最小可见文本长度
+const AUTO_CONTINUE_MIN_VISIBLE_CHARS: usize = 5;
+
+fn should_auto_continue(elapsed: Duration, segment: &AutoContinueSegment) -> bool {
+    if segment.has_tool_use {
+        return false;
+    }
+
+    if elapsed >= AUTO_CONTINUE_MAX_DURATION {
+        return false;
+    }
+
+    if segment.visible_text.trim().chars().count() <= AUTO_CONTINUE_MIN_VISIBLE_CHARS {
+        return false;
+    }
+
+    segment.estimated_output_tokens() < AUTO_CONTINUE_MAX_OUTPUT_TOKENS
+}
+
+fn build_auto_continue_payload(
+    payload: &MessagesRequest,
+    assistant_text: &str,
+) -> MessagesRequest {
+    let mut next_payload = payload.clone();
+
+    // thinking 请求的续写历史只追加“可见输出”，并关闭后续请求的 thinking 前缀。
+    // 这样可以避免同一个 Anthropic 响应里出现多段 thinking block，同时仍然让模型基于已输出文本继续写。
+    if next_payload.thinking.as_ref().is_some_and(|t| t.is_enabled()) {
+        next_payload.thinking = None;
+        next_payload.output_config = None;
+    }
+
+    next_payload.messages.push(Message {
+        role: "assistant".to_string(),
+        content: serde_json::Value::String(assistant_text.to_string()),
+    });
+    next_payload.messages.push(Message {
+        role: "user".to_string(),
+        content: serde_json::Value::String(AUTO_CONTINUE_NUDGE_PROMPT.to_string()),
+    });
+    next_payload
+}
+
+fn build_request_body(payload: &MessagesRequest) -> anyhow::Result<String> {
+    let conversion_result = convert_request(payload)
+        .map_err(|e| anyhow::anyhow!("请求转换失败: {}", e))?;
+
+    let kiro_request = KiroRequest {
+        conversation_state: conversion_result.conversation_state,
+        profile_arn: None,
+    };
+
+    serde_json::to_string(&kiro_request).map_err(|e| anyhow::anyhow!("序列化请求失败: {}", e))
+}
+
+fn prepare_auto_continue_request(
+    payload: &MessagesRequest,
+    assistant_text: &str,
+) -> anyhow::Result<(MessagesRequest, String)> {
+    let next_payload = build_auto_continue_payload(payload, assistant_text);
+    let next_request_body = build_request_body(&next_payload)?;
+    Ok((next_payload, next_request_body))
+}
+
+fn continuation_log_suffix(segment: &AutoContinueSegment, elapsed: Duration) -> String {
+    format!(
+        "耗时 {:?}，可见输出约 {} tokens",
+        elapsed,
+        segment.estimated_output_tokens()
+    )
+}
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
@@ -223,6 +306,8 @@ pub async fn post_messages(
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
 
+    let request_template = payload.clone();
+
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
         tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
@@ -299,16 +384,27 @@ pub async fn post_messages(
         handle_stream_request(
             provider,
             &request_body,
+            request_template,
             &payload.model,
             input_tokens,
             thinking_enabled,
+            state.runtime_flags.clone(),
             tool_name_map,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            request_template,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            state.runtime_flags.clone(),
+            tool_name_map,
+        ).await
     }
 }
 
@@ -316,9 +412,11 @@ pub async fn post_messages(
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
+    request_template: MessagesRequest,
     model: &str,
     input_tokens: i32,
     thinking_enabled: bool,
+    runtime_flags: Arc<RuntimeFlags>,
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
@@ -334,7 +432,15 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    let stream = create_sse_stream(
+        provider,
+        request_template,
+        response,
+        ctx,
+        initial_events,
+        thinking_enabled,
+        runtime_flags,
+    );
 
     // 返回 SSE 响应
     Response::builder()
@@ -353,90 +459,206 @@ const PING_INTERVAL_SECS: u64 = 25;
 fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
-
 /// 创建 SSE 事件流
 fn create_sse_stream(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    request_template: MessagesRequest,
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
+    thinking_enabled: bool,
+    runtime_flags: Arc<RuntimeFlags>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
-    // 先发送初始事件
     let initial_stream = stream::iter(
         initial_events
             .into_iter()
             .map(|e| Ok(Bytes::from(e.to_sse_string()))),
     );
 
-    // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
-    let body_stream = response.bytes_stream();
-
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS))),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (
+            provider,
+            request_template,
+            response.bytes_stream(),
+            ctx,
+            EventStreamDecoder::new(),
+            false,
+            interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            std::time::Instant::now(),
+            0usize,
+            thinking_enabled,
+            runtime_flags,
+        ),
+        |(
+            provider,
+            mut request_template,
+            mut body_stream,
+            mut ctx,
+            mut decoder,
+            finished,
+            mut ping_interval,
+            mut request_started_at,
+            mut continue_count,
+            thinking_enabled,
+            runtime_flags,
+        )| async move {
             if finished {
                 return None;
             }
 
-            // 使用 select! 同时等待数据和 ping 定时器
-            tokio::select! {
-                // 处理数据流
-                chunk_result = body_stream.next() => {
-                    match chunk_result {
-                        Some(Ok(chunk)) => {
-                            // 解码事件
-                            if let Err(e) = decoder.feed(&chunk) {
-                                tracing::warn!("缓冲区溢出: {}", e);
-                            }
+            loop {
+                tokio::select! {
+                    chunk_result = body_stream.next() => {
+                       match chunk_result {
+                            Some(Ok(chunk)) => {
+                                if let Err(e) = decoder.feed(&chunk) {
+                                    tracing::warn!("缓冲区溢出: {}", e);
+                                }
 
-                            let mut events = Vec::new();
-                            for result in decoder.decode_iter() {
-                                match result {
-                                    Ok(frame) => {
-                                        if let Ok(event) = Event::from_frame(frame) {
-                                            let sse_events = ctx.process_kiro_event(&event);
-                                            events.extend(sse_events);
+                                let mut events = Vec::new();
+                                for result in decoder.decode_iter() {
+                                    match result {
+                                        Ok(frame) => {
+                                            if let Ok(event) = Event::from_frame(frame) {
+                                                events.extend(ctx.process_kiro_event(&event));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("解码事件失败: {}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("解码事件失败: {}", e);
+                                }
+
+                                let bytes: Vec<Result<Bytes, Infallible>> = events
+                                    .into_iter()
+                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
+                                    .collect();
+
+                                return Some((
+                                    stream::iter(bytes),
+                                    (
+                                        provider,
+                                        request_template,
+                                        body_stream,
+                                        ctx,
+                                        decoder,
+                                        false,
+                                        ping_interval,
+                                        request_started_at,
+                                        continue_count,
+                                        thinking_enabled,
+                                        runtime_flags,
+                                    ),
+                                ));
+                            }
+                            Some(Err(e)) => {
+                                tracing::error!("读取响应流失败: {}", e);
+                                let final_events = ctx.generate_final_events();
+                                let bytes: Vec<Result<Bytes, Infallible>> = final_events
+                                    .into_iter()
+                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
+                                    .collect();
+
+                                return Some((
+ stream::iter(bytes),
+                                    (
+                                        provider,
+                                        request_template,
+                                        body_stream,
+                                        ctx,
+                                        decoder,
+                                        true,
+                                        ping_interval,
+                                        request_started_at,
+                                        continue_count,
+                                        thinking_enabled,
+                                        runtime_flags,
+                                    ),
+                                ));
+                            }
+                            None => {
+                                let segment = ctx.auto_continue_segment();
+                                let elapsed = request_started_at.elapsed();
+                                let can_continue = runtime_flags.auto_continue_enabled()
+                                    && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
+                                    && should_auto_continue(elapsed, &segment);
+
+                                if can_continue {
+                                    match prepare_auto_continue_request(&request_template, &segment.visible_text) {
+                                        Ok((next_payload, next_request_body)) => {
+                                            tracing::info!(
+                                                "触发自动续写（流式）：第 {} 轮，{}",
+                                                continue_count + 1,
+            continuation_log_suffix(&segment, elapsed)
+                                            );
+
+                                            match provider.call_api_stream(&next_request_body).await {
+                                                Ok(next_response) => {
+                                                    request_template = next_payload;
+                                                    body_stream = next_response.bytes_stream();
+                                                    decoder = EventStreamDecoder::new();
+                                                    request_started_at = std::time::Instant::now();
+                                                    continue_count += 1;
+                                                    ctx.reset_auto_continue_segment();
+                                                    continue;
+                                                }
+                                                Err(err) => {
+                                                    tracing::warn!("自动续写请求失败，结束当前流: {}", err);
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!("构建自动续写请求失败，结束当前流: {}", err);
+                                        }
                                     }
                                 }
+
+                                let final_events = ctx.generate_final_events();
+                                let bytes: Vec<Result<Bytes, Infallible>> = final_events
+                                    .into_iter()
+                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
+                                    .collect();
+
+ return Some((
+                                    stream::iter(bytes),
+                                    (
+                                        provider,
+                                        request_template,
+                                        body_stream,
+                                        ctx,
+                                        decoder,
+                                        true,
+                                        ping_interval,
+                                        request_started_at,
+                                        continue_count,
+                                        thinking_enabled,
+                                        runtime_flags,
+                                    ),
+                                ));
                             }
-
-                            // 转换为 SSE 字节流
-                            let bytes: Vec<Result<Bytes, Infallible>> = events
-                                .into_iter()
-                                .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                .collect();
-
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!("读取响应流失败: {}", e);
-                            // 发送最终事件并结束
-                            let final_events = ctx.generate_final_events();
-                            let bytes: Vec<Result<Bytes, Infallible>> = final_events
-                                .into_iter()
-                                .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
-                        }
-                        None => {
-                            // 流结束，发送最终事件
-                            let final_events = ctx.generate_final_events();
-                            let bytes: Vec<Result<Bytes, Infallible>> = final_events
-                                .into_iter()
-                                .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
                         }
                     }
-                }
-                // 发送 ping 保活
-                _ = ping_interval.tick() => {
-                    tracing::trace!("发送 ping 保活事件");
-                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    _ = ping_interval.tick() => {
+                        tracing::trace!("发送 ping 保活事件");
+                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
+
+                        return Some((
+                            stream::iter(bytes),
+                            (
+                                provider,
+                                request_template,
+                                body_stream,
+                                ctx,
+                                decoder,
+                                false,
+                                ping_interval,
+                                request_started_at,
+                                continue_count,
+                                thinking_enabled,
+                                runtime_flags,
+                            ),
+                        ));
+                    }
                 }
             }
         },
@@ -448,40 +670,22 @@ fn create_sse_stream(
 
 use super::converter::get_context_window_size;
 
-/// 处理非流式请求
-async fn handle_non_stream_request(
-    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
-    request_body: &str,
+struct NonStreamSegmentResult {
+    content: Vec<serde_json::Value>,
+    visible_text: String,
+    has_tool_use: bool,
+    stop_reason: String,
+    context_input_tokens: Option<i32>,
+}
+
+fn parse_non_stream_segment(
+    body_bytes: &Bytes,
     model: &str,
-    input_tokens: i32,
     thinking_enabled: bool,
-    tool_name_map: std::collections::HashMap<String, String>,
-) -> Response {
-    // 调用 Kiro API（支持多凭据故障转移）
-    let response = match provider.call_api(request_body).await {
-        Ok(resp) => resp,
-        Err(e) => return map_provider_error(e),
-    };
-
-    // 读取响应体
-    let body_bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::error!("读取响应体失败: {}", e);
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "api_error",
-                    format!("读取响应失败: {}", e),
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    // 解析事件流
+    tool_name_map: &std::collections::HashMap<String, String>,
+) -> NonStreamSegmentResult {
     let mut decoder = EventStreamDecoder::new();
-    if let Err(e) = decoder.feed(&body_bytes) {
+    if let Err(e) = decoder.feed(body_bytes) {
         tracing::warn!("缓冲区溢出: {}", e);
     }
 
@@ -489,10 +693,7 @@ async fn handle_non_stream_request(
     let mut tool_uses: Vec<serde_json::Value> = Vec::new();
     let mut has_tool_use = false;
     let mut stop_reason = "end_turn".to_string();
-    // 从 contextUsageEvent 计算的实际输入 tokens
     let mut context_input_tokens: Option<i32> = None;
-
-    // 收集工具调用的增量 JSON
     let mut tool_json_buffers: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
@@ -501,31 +702,28 @@ async fn handle_non_stream_request(
             Ok(frame) => {
                 if let Ok(event) = Event::from_frame(frame) {
                     match event {
-                        Event::AssistantResponse(resp) => {
+                Event::AssistantResponse(resp) => {
                             text_content.push_str(&resp.content);
                         }
                         Event::ToolUse(tool_use) => {
                             has_tool_use = true;
-
-                            // 累积工具的 JSON 输入
                             let buffer = tool_json_buffers
                                 .entry(tool_use.tool_use_id.clone())
                                 .or_insert_with(String::new);
                             buffer.push_str(&tool_use.input);
 
-                            // 如果是完整的工具调用，添加到列表
                             if tool_use.stop {
                                 let input: serde_json::Value = if buffer.is_empty() {
                                     serde_json::json!({})
                                 } else {
-                                    serde_json::from_str(buffer)
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!(
-                                                "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                                e, tool_use.tool_use_id
-                                            );
-                                            serde_json::json!({})
-                                        })
+                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                            e,
+                                            tool_use.tool_use_id
+                                        );
+                                        serde_json::json!({})
+                                    })
                                 };
 
                                 let original_name = tool_name_map
@@ -540,16 +738,13 @@ async fn handle_non_stream_request(
                                     "input": input
                                 }));
                             }
-                        }
+                 }
                         Event::ContextUsage(context_usage) => {
-                            // 从上下文使用百分比计算实际的 input_tokens
                             let window_size = get_context_window_size(model);
-                            let actual_input_tokens = (context_usage.context_usage_percentage
-                                * (window_size as f64)
-                                / 100.0)
-                                as i32;
+                            let actual_input_tokens =
+                                (context_usage.context_usage_percentage * (window_size as f64) / 100.0)
+                                    as i32;
                             context_input_tokens = Some(actual_input_tokens);
-                            // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                             if context_usage.context_usage_percentage >= 100.0 {
                                 stop_reason = "model_context_window_exceeded".to_string();
                             }
@@ -574,16 +769,14 @@ async fn handle_non_stream_request(
         }
     }
 
-    // 确定 stop_reason
     if has_tool_use && stop_reason == "end_turn" {
         stop_reason = "tool_use".to_string();
     }
 
-    // 构建响应内容
     let mut content: Vec<serde_json::Value> = Vec::new();
+    let mut visible_text = text_content.clone();
 
     if thinking_enabled {
-        // 从完整文本中提取 thinking 块
         let (thinking, remaining_text) =
             super::stream::extract_thinking_from_complete_text(&text_content);
 
@@ -597,9 +790,11 @@ async fn handle_non_stream_request(
         if !remaining_text.is_empty() {
             content.push(json!({
                 "type": "text",
-                "text": remaining_text
+                "text": remaining_text.clone()
             }));
-        }
+    }
+
+        visible_text = remaining_text;
     } else if !text_content.is_empty() {
         content.push(json!({
             "type": "text",
@@ -609,18 +804,128 @@ async fn handle_non_stream_request(
 
     content.extend(tool_uses);
 
-    // 估算输出 tokens
-    let output_tokens = token::estimate_output_tokens(&content);
+    NonStreamSegmentResult {
+        content,
+        visible_text,
+        has_tool_use,
+        stop_reason,
+        context_input_tokens,
+    }
+}
 
-    // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-    let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+/// 处理非流式请求
+async fn handle_non_stream_request(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    request_body: &str,
+    request_template: MessagesRequest,
+    model: &str,
+    input_tokens: i32,
+    thinking_enabled: bool,
+    runtime_flags: Arc<RuntimeFlags>,
+    tool_name_map: std::collections::HashMap<String, String>,
+) -> Response {
+    let mut current_request_template = request_template;
+    let mut current_request_body = request_body.to_string();
+    let mut continue_count = 0usize;
+    let mut final_input_tokens = input_tokens;
+    let mut aggregated_visible_text = String::new();
+    let mut final_content: Vec<serde_json::Value> = Vec::new();
+    let mut stop_reason = "end_turn".to_string();
 
-    // 构建 Anthropic 响应
+    loop {
+        let request_started_at = std::time::Instant::now();
+        let response = match provider.call_api(&current_request_body).await {
+            Ok(resp) => resp,
+            Err(e) => return map_provider_error(e),
+        };
+
+        let body_bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!("读取响应体失败: {}", e);
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse::new(
+                        "api_error",
+                        format!("读取响应失败: {}", e),
+                    )),
+                )
+                    .into_response();
+            }
+        };
+
+        let segment = parse_non_stream_segment(&body_bytes, model, thinking_enabled, &tool_name_map);
+        let elapsed = request_started_at.elapsed();
+
+        if continue_count == 0 {
+            final_input_tokens = segment.context_input_tokens.unwrap_or(input_tokens);
+        }
+
+        stop_reason = segment.stop_reason.clone();
+
+        if thinking_enabled || segment.has_tool_use {
+            final_content.extend(segment.content.clone());
+        } else {
+            aggregated_visible_text.push_str(&segment.visible_text);
+        }
+
+        let segment_snapshot = AutoContinueSegment {
+            visible_text: segment.visible_text.clone(),
+            has_tool_use: segment.has_tool_use,
+        };
+
+        let can_continue = runtime_flags.auto_continue_enabled()
+            && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
+            && should_auto_continue(elapsed, &segment_snapshot);
+
+        if !can_continue {
+            if !thinking_enabled && !segment.has_tool_use {
+                final_content = if aggregated_visible_text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![json!({
+                        "type": "text",
+                        "text": aggregated_visible_text
+                    })]
+                };
+            }
+            break;
+        }
+
+        match prepare_auto_continue_request(&current_request_template, &segment.visible_text) {
+            Ok((next_payload, next_request_body)) => {
+                tracing::info!(
+                    "触发自动续写（非流式）：第 {} 轮，{}",
+                    continue_count + 1,
+                    continuation_log_suffix(&segment_snapshot, elapsed)
+                );
+                current_request_template = next_payload;
+                current_request_body = next_request_body;
+                continue_count += 1;
+            }
+            Err(err) => {
+                tracing::warn!("构建自动续写请求失败，返回当前结果: {}", err);
+                if !thinking_enabled && !segment.has_tool_use {
+                    final_content = if aggregated_visible_text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![json!({
+                            "type": "text",
+                            "text": aggregated_visible_text
+                        })]
+                    };
+                }
+                break;
+            }
+        }
+    }
+
+    let output_tokens = token::estimate_output_tokens(&final_content);
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
         "type": "message",
         "role": "assistant",
-        "content": content,
+        "content": final_content,
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": null,
@@ -632,6 +937,8 @@ async fn handle_non_stream_request(
 
     (StatusCode::OK, Json(response_body)).into_response()
 }
+
+
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
 ///
@@ -732,6 +1039,8 @@ pub async fn post_messages_cc(
     // 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
     override_thinking_from_model_name(&mut payload);
 
+    let request_template = payload.clone();
+
     // 检查是否为 WebSearch 请求
     if websearch::has_web_search_tool(&payload) {
         tracing::info!("检测到 WebSearch 工具，路由到 WebSearch 处理");
@@ -808,16 +1117,28 @@ pub async fn post_messages_cc(
         handle_stream_request_buffered(
             provider,
             &request_body,
+            request_template,
             &payload.model,
             input_tokens,
             thinking_enabled,
+            state.runtime_flags.clone(),
             tool_name_map,
         )
         .await
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            request_template,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            state.runtime_flags.clone(),
+            tool_name_map,
+        )
+        .await
     }
 }
 
@@ -828,9 +1149,11 @@ pub async fn post_messages_cc(
 async fn handle_stream_request_buffered(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
     request_body: &str,
+    request_template: MessagesRequest,
     model: &str,
     estimated_input_tokens: i32,
     thinking_enabled: bool,
+    runtime_flags: Arc<RuntimeFlags>,
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
@@ -843,7 +1166,14 @@ async fn handle_stream_request_buffered(
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled, tool_name_map);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(
+        provider,
+        request_template,
+        response,
+        ctx,
+        thinking_enabled,
+        runtime_flags,
+    );
 
     // 返回 SSE 响应
     Response::builder()
@@ -863,79 +1193,174 @@ async fn handle_stream_request_buffered(
 /// 3. 流结束后，用正确的 input_tokens 更正 message_start 事件
 /// 4. 一次性发送所有事件
 fn create_buffered_sse_stream(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    request_template: MessagesRequest,
     response: reqwest::Response,
     ctx: BufferedStreamContext,
+    thinking_enabled: bool,
+    runtime_flags: Arc<RuntimeFlags>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
 
     stream::unfold(
         (
+            provider,
+            request_template,
             body_stream,
             ctx,
             EventStreamDecoder::new(),
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            std::time::Instant::now(),
+            0usize,
+            thinking_enabled,
+            runtime_flags,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        |(
+            provider,
+            mut request_template,
+            mut body_stream,
+            mut ctx,
+            mut decoder,
+            finished,
+            mut ping_interval,
+            mut request_started_at,
+            mut continue_count,
+            thinking_enabled,
+            runtime_flags,
+        )| async move {
             if finished {
                 return None;
             }
 
             loop {
                 tokio::select! {
-                    // 使用 biased 模式，优先检查 ping 定时器
-                    // 避免在上游 chunk 密集时 ping 被"饿死"
                     biased;
 
-                    // 优先检查 ping 保活（等待期间唯一发送的数据）
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
                         let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)));
+                        return Some((
+                            stream::iter(bytes),
+                            (
+                                provider,
+                                request_template,
+                                body_stream,
+                                ctx,
+                                decoder,
+                                false,
+                                ping_interval,
+                                request_started_at,
+                                continue_count,
+                                thinking_enabled,
+                                runtime_flags,
+                            ),
+                        ));
                     }
 
-                    // 然后处理数据流
                     chunk_result = body_stream.next() => {
                         match chunk_result {
                             Some(Ok(chunk)) => {
-                                // 解码事件
                                 if let Err(e) = decoder.feed(&chunk) {
                                     tracing::warn!("缓冲区溢出: {}", e);
                                 }
+
 
                                 for result in decoder.decode_iter() {
                                     match result {
                                         Ok(frame) => {
                                             if let Ok(event) = Event::from_frame(frame) {
-                                                // 缓冲事件（复用 StreamContext 的处理逻辑）
                                                 ctx.process_and_buffer(&event);
                                             }
-                                        }
+              }
                                         Err(e) => {
                                             tracing::warn!("解码事件失败: {}", e);
                                         }
                                     }
                                 }
-                                // 继续读取下一个 chunk，不发送任何数据
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
-                                // 发生错误，完成处理并返回所有事件
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((
+                                    stream::iter(bytes),
+                                    (
+                                        provider,
+                                        request_template,
+                                        body_stream,
+                                        ctx,
+                                        decoder,
+                                        true,
+                                        ping_interval,
+                                        request_started_at,
+                                        continue_count,
+                                        thinking_enabled,
+                                        runtime_flags,
+                                    ),
+                                ));
                             }
                             None => {
-                                // 流结束，完成处理并返回所有事件（已更正 input_tokens）
+                                let segment = ctx.auto_continue_segment();
+                                let elapsed = request_started_at.elapsed();
+                                let can_continue = runtime_flags.auto_continue_enabled()
+                                    && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
+                                    && should_auto_continue(elapsed, &segment);
+
+                                if can_continue {
+                                    match prepare_auto_continue_request(&request_template, &segment.visible_text) {
+                                        Ok((next_payload, next_request_body)) => {
+                                            tracing::info!(
+                                                "触发自动续写（缓冲流）：第 {} 轮，{}",
+                                                continue_count + 1,
+                                                continuation_log_suffix(&segment, elapsed)
+                                            );
+
+                                            match provider.call_api_stream(&next_request_body).await {
+                                                Ok(next_response) => {
+                                                    request_template = next_payload;
+                                                    body_stream = next_response.bytes_stream();
+                                                    decoder = EventStreamDecoder::new();
+                                                    request_started_at = std::time::Instant::now();
+                                                    continue_count += 1;
+                                                    ctx.reset_auto_continue_segment();
+                                                    continue;
+                                                }
+                                     Err(err) => {
+                                                    tracing::warn!("自动续写请求失败，结束缓冲流: {}", err);
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!("构建自动续写请求失败，结束缓冲流: {}", err);
+                                        }
+                                    }
+                                }
+
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((
+                                    stream::iter(bytes),
+                                    (
+                                        provider,
+                                        request_template,
+                                        body_stream,
+                                        ctx,
+                                        decoder,
+                                        true,
+                                        ping_interval,
+                                        request_started_at,
+                                        continue_count,
+                                        thinking_enabled,
+                                        runtime_flags,
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -945,3 +1370,4 @@ fn create_buffered_sse_stream(
     )
     .flatten()
 }
+

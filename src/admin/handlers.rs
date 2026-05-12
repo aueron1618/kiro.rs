@@ -9,8 +9,8 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse,
+        AddCredentialRequest, SetAutoContinueConfigRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -136,6 +136,26 @@ pub async fn set_load_balancing_mode(
     Json(payload): Json<SetLoadBalancingModeRequest>,
 ) -> impl IntoResponse {
     match state.service.set_load_balancing_mode(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+
+/// GET /api/admin/config/auto-continue
+/// 获取自动续写开关
+pub async fn get_auto_continue_config(State(state): State<AdminState>) -> impl IntoResponse {
+    let response = state.service.get_auto_continue_config();
+    Json(response)
+}
+
+/// PUT /api/admin/config/auto-continue
+/// 设置自动续写开关（即时生效）
+pub async fn set_auto_continue_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetAutoContinueConfigRequest>,
+) -> impl IntoResponse {
+    match state.service.set_auto_continue_config(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }

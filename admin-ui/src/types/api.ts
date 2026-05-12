@@ -87,3 +87,13 @@ export interface AddCredentialResponse {
   credentialId: number
   email?: string
 }
+
+// 自动续写开关响应
+export interface AutoContinueConfigResponse {
+  enabled: boolean
+}
+
+// 自动续写开关设置请求
+export interface SetAutoContinueConfigRequest {
+  enabled: boolean
+}

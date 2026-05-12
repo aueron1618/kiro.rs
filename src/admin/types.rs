@@ -196,6 +196,24 @@ pub struct SetLoadBalancingModeRequest {
     pub mode: String,
 }
 
+// ============ 自动续写配置 ============
+
+/// 自动续写开关响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoContinueConfigResponse {
+    /// 是否启用自动续写
+    pub enabled: bool,
+}
+
+/// 设置自动续写开关请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAutoContinueConfigRequest {
+    /// 是否启用自动续写
+    pub enabled: bool,
+}
+
 // ============ 通用响应 ============
 
 /// 操作成功响应

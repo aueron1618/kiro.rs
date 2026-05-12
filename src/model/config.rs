@@ -98,6 +98,10 @@ pub struct Config {
     #[serde(default = "default_extract_thinking")]
     pub extract_thinking: bool,
 
+    /// 是否启用自动续写（默认 true，可通过 Admin UI 即时切换）
+    #[serde(default = "default_auto_continue_enabled")]
+    pub auto_continue_enabled: bool,
+
     /// 默认端点名称（凭据未显式指定 endpoint 时使用，默认 "ide"）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
@@ -155,6 +159,10 @@ fn default_extract_thinking() -> bool {
     true
 }
 
+fn default_auto_continue_enabled() -> bool {
+    true
+}
+
 fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
 }
@@ -182,6 +190,7 @@ impl Default for Config {
             admin_api_key: None,
             load_balancing_mode: default_load_balancing_mode(),
             extract_thinking: default_extract_thinking(),
+            auto_continue_enabled: default_auto_continue_enabled(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
             config_path: None,

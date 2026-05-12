@@ -542,6 +542,26 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// 当前分段已输出的可见文本，用于自动续写判断
+    current_segment_visible_text: String,
+    /// 当前分段是否出现了工具调用
+    current_segment_has_tool_use: bool,
+}
+
+/// 自动续写判断所需的当前分段快照
+#[derive(Debug, Clone)]
+pub struct AutoContinueSegment {
+    /// 当前分段的可见文本（不包含 thinking）
+    pub visible_text: String,
+    /// 当前分段是否发生过 tool_use
+    pub has_tool_use: bool,
+}
+
+impl AutoContinueSegment {
+    /// 估算当前分段可见文本的输出 tokens
+    pub fn estimated_output_tokens(&self) -> i32 {
+        estimate_tokens(&self.visible_text)
+    }
 }
 
 impl StreamContext {
@@ -568,6 +588,8 @@ impl StreamContext {
             thinking_block_index: None,
             text_block_index: None,
             strip_thinking_leading_newline: false,
+            current_segment_visible_text: String::new(),
+            current_segment_has_tool_use: false,
         }
     }
 
@@ -628,6 +650,30 @@ impl StreamContext {
         events.extend(text_block_events);
 
         events
+    }
+
+    /// 获取当前分段的自动续写判断快照
+    pub fn auto_continue_segment(&self) -> AutoContinueSegment {
+        AutoContinueSegment {
+            visible_text: self.current_segment_visible_text.clone(),
+            has_tool_use: self.current_segment_has_tool_use,
+        }
+    }
+
+    /// 重置当前分段的自动续写统计
+    pub fn reset_auto_continue_segment(&mut self) {
+        self.current_segment_visible_text.clear();
+        self.current_segment_has_tool_use = false;
+
+        // 自动续写请求会关闭后续上游请求的 thinking 前缀，只让模型继续可见文本。
+        // 因此进入下一段前也要把本地 thinking 解析器切到“已处理”状态，
+        // 避免它继续等待新的 <thinking> 标签而暂存/吞掉续写文本。
+        if self.thinking_enabled {
+            self.thinking_buffer.clear();
+            self.in_thinking_block = false;
+            self.thinking_extracted = true;
+            self.strip_thinking_leading_newline = false;
+        }
     }
 
     /// 处理 Kiro 事件并转换为 Anthropic SSE 事件
@@ -850,6 +896,9 @@ impl StreamContext {
     fn create_text_delta_events(&mut self, text: &str) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
+        // 记录当前分段的可见文本，供自动续写判断使用
+        self.current_segment_visible_text.push_str(text);
+
         // 如果当前 text_block_index 指向的块已经被关闭（例如 tool_use 开始时自动 stop），
         // 则丢弃该索引并创建新的文本块继续输出，避免 delta 被状态机拒绝导致“吞字”。
         if let Some(idx) = self.text_block_index {
@@ -923,6 +972,7 @@ impl StreamContext {
     ) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
+        self.current_segment_has_tool_use = true;
         self.state_manager.set_has_tool_use(true);
 
         // tool_use 必须发生在 thinking 结束之后。
@@ -1182,6 +1232,16 @@ impl BufferedStreamContext {
         // 处理事件并缓冲结果
         let events = self.inner.process_kiro_event(event);
         self.event_buffer.extend(events);
+    }
+
+    /// 获取当前分段的自动续写快照
+    pub fn auto_continue_segment(&self) -> AutoContinueSegment {
+        self.inner.auto_continue_segment()
+    }
+
+    /// 重置当前分段的自动续写统计
+    pub fn reset_auto_continue_segment(&mut self) {
+        self.inner.reset_auto_continue_segment();
     }
 
     /// 完成流处理并返回所有事件

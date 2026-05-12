@@ -10,6 +10,8 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  getAutoContinueConfig,
+  setAutoContinueConfig,
 } from '@/api/credentials'
 import type { AddCredentialRequest } from '@/types/api'
 
@@ -115,6 +117,25 @@ export function useSetLoadBalancingMode() {
     mutationFn: setLoadBalancingMode,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
+    },
+  })
+}
+
+// 获取自动续写开关
+export function useAutoContinueConfig() {
+  return useQuery({
+    queryKey: ['autoContinueConfig'],
+    queryFn: getAutoContinueConfig,
+  })
+}
+
+// 设置自动续写开关
+export function useSetAutoContinueConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: setAutoContinueConfig,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['autoContinueConfig'] })
     },
   })
 }
