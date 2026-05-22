@@ -9,6 +9,136 @@ use uuid::Uuid;
 
 use crate::kiro::model::events::Event;
 
+/// 自动续写完成标记。
+///
+/// 参考 gcli2api 的 anti_truncation 逻辑：请求侧要求模型在完整结束时输出该标记，
+/// 响应侧检测并移除该标记；若单轮上游流结束时仍未发现标记，则继续请求剩余内容。
+pub(crate) const DONE_MARKER: &str = "[done]";
+/// 流式输出时固定保留的尾部字符数，用于跨 chunk 判定 `[done]`。
+const DONE_MARKER_TAIL_CHARS: usize = 10;
+
+fn find_done_marker(text: &str) -> Option<(usize, usize)> {
+    let marker = DONE_MARKER.as_bytes();
+    text.as_bytes()
+        .windows(marker.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(marker.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+        .map(|start| (start, start + marker.len()))
+}
+
+/// 从文本中移除自动续写完成标记。
+///
+/// 标记通常位于最后一行，因此移除时会顺带剥离标记两侧的纯空白，避免把
+/// `\n[done]` 泄漏为一个空行。返回值中的 bool 表示是否检测到过标记。
+pub(crate) fn strip_done_marker_from_text(text: &str) -> (String, bool) {
+    let Some((start, end)) = find_done_marker(text) else {
+        return (text.to_string(), false);
+    };
+
+    let before = text[..start]
+        .trim_end_matches(|c: char| c.is_whitespace())
+        .to_string();
+    let after = text[end..]
+        .trim_start_matches(|c: char| c.is_whitespace())
+        .to_string();
+
+    if before.is_empty() {
+        (after, true)
+    } else if after.is_empty() {
+        (before, true)
+    } else {
+        let mut cleaned = before;
+        cleaned.push_str(&after);
+        (cleaned, true)
+    }
+}
+
+/// 返回保留尾部窗口的起始字节位置。
+fn tail_window_start(text: &str, tail_chars: usize) -> usize {
+    if tail_chars == 0 {
+        return text.len();
+    }
+
+    text.char_indices()
+        .rev()
+        .nth(tail_chars.saturating_sub(1))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Default, Clone)]
+struct DoneMarkerFilter {
+    pending: String,
+    marker_seen: bool,
+}
+
+#[derive(Debug, Default)]
+struct DoneMarkerFilterOutput {
+    text: String,
+    marker_found: bool,
+}
+
+impl DoneMarkerFilter {
+    fn push(&mut self, chunk: &str) -> DoneMarkerFilterOutput {
+        if self.marker_seen {
+            if chunk.trim().is_empty() {
+                return DoneMarkerFilterOutput::default();
+            }
+
+            return DoneMarkerFilterOutput {
+                text: chunk.trim_start().to_string(),
+                marker_found: false,
+            };
+        }
+
+        let mut combined = std::mem::take(&mut self.pending);
+        combined.push_str(chunk);
+
+        let (mut text, marker_found) = strip_done_marker_from_text(&combined);
+        if marker_found {
+            self.marker_seen = true;
+            return DoneMarkerFilterOutput { text, marker_found };
+        }
+
+        let tail_start = tail_window_start(&text, DONE_MARKER_TAIL_CHARS);
+        if tail_start == 0 {
+            self.pending = text;
+            return DoneMarkerFilterOutput::default();
+        }
+
+        self.pending = text.split_off(tail_start);
+
+        DoneMarkerFilterOutput {
+            text,
+            marker_found: false,
+        }
+    }
+
+    fn finish(&mut self) -> DoneMarkerFilterOutput {
+        if self.marker_seen {
+            self.pending.clear();
+            return DoneMarkerFilterOutput::default();
+        }
+
+        let pending = std::mem::take(&mut self.pending);
+        let (text, marker_found) = strip_done_marker_from_text(&pending);
+        if marker_found {
+            self.marker_seen = true;
+        }
+
+        DoneMarkerFilterOutput { text, marker_found }
+    }
+
+    fn reset(&mut self) {
+        self.pending.clear();
+        self.marker_seen = false;
+    }
+}
+
 /// 找到小于等于目标位置的最近有效UTF-8字符边界
 ///
 /// UTF-8字符可能占用1-4个字节，直接按字节位置切片可能会切在多字节字符中间导致panic。
@@ -189,27 +319,21 @@ pub(crate) fn extract_thinking_from_complete_text(text: &str) -> (Option<String>
     let after_open = &text[start_pos + "<thinking>".len()..];
 
     // 查找结束标签：优先匹配带 \n\n 后缀的，退而使用末尾匹配
-    let (thinking_raw, text_after) =
-        if let Some(end_pos) = find_real_thinking_end_tag(after_open) {
-            (
-                &after_open[..end_pos],
-                &after_open[end_pos + "</thinking>\n\n".len()..],
-            )
-        } else if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(after_open) {
-            let after_tag = end_pos + "</thinking>".len();
-            (
-                &after_open[..end_pos],
-                after_open[after_tag..].trim_start(),
-            )
-        } else {
-            // 找不到有效的结束标签，不做提取
-            return (None, text.to_string());
-        };
+    let (thinking_raw, text_after) = if let Some(end_pos) = find_real_thinking_end_tag(after_open) {
+        (
+            &after_open[..end_pos],
+            &after_open[end_pos + "</thinking>\n\n".len()..],
+        )
+    } else if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(after_open) {
+        let after_tag = end_pos + "</thinking>".len();
+        (&after_open[..end_pos], after_open[after_tag..].trim_start())
+    } else {
+        // 找不到有效的结束标签，不做提取
+        return (None, text.to_string());
+    };
 
     // 剥离开头的换行符（与流式处理一致：模型输出 <thinking>\n）
-    let thinking_content = thinking_raw
-        .strip_prefix('\n')
-        .unwrap_or(thinking_raw);
+    let thinking_content = thinking_raw.strip_prefix('\n').unwrap_or(thinking_raw);
 
     // 组装剩余文本：跳过纯空白的 before 部分
     let mut remaining = String::new();
@@ -546,6 +670,10 @@ pub struct StreamContext {
     current_segment_visible_text: String,
     /// 当前分段是否出现了工具调用
     current_segment_has_tool_use: bool,
+    /// 当前分段是否检测到自动续写完成标记
+    current_segment_done_marker_found: bool,
+    /// 自动续写开启时，过滤流式文本中的 `[done]` 完成标记，并避免其前导空白泄漏给客户端
+    done_marker_filter: Option<DoneMarkerFilter>,
 }
 
 /// 自动续写判断所需的当前分段快照
@@ -555,6 +683,8 @@ pub struct AutoContinueSegment {
     pub visible_text: String,
     /// 当前分段是否发生过 tool_use
     pub has_tool_use: bool,
+    /// 当前分段是否检测到完成标记
+    pub done_marker_found: bool,
 }
 
 impl AutoContinueSegment {
@@ -571,6 +701,23 @@ impl StreamContext {
         input_tokens: i32,
         thinking_enabled: bool,
         tool_name_map: HashMap<String, String>,
+    ) -> Self {
+        Self::new_with_done_marker_filter(
+            model,
+            input_tokens,
+            thinking_enabled,
+            tool_name_map,
+            false,
+        )
+    }
+
+    /// 创建 StreamContext，并显式控制是否启用 `[done]` 过滤。
+    pub fn new_with_done_marker_filter(
+        model: impl Into<String>,
+        input_tokens: i32,
+        thinking_enabled: bool,
+        tool_name_map: HashMap<String, String>,
+        done_marker_filter_enabled: bool,
     ) -> Self {
         Self {
             state_manager: SseStateManager::new(),
@@ -590,6 +737,12 @@ impl StreamContext {
             strip_thinking_leading_newline: false,
             current_segment_visible_text: String::new(),
             current_segment_has_tool_use: false,
+            current_segment_done_marker_found: false,
+            done_marker_filter: if done_marker_filter_enabled {
+                Some(DoneMarkerFilter::default())
+            } else {
+                None
+            },
         }
     }
 
@@ -657,6 +810,7 @@ impl StreamContext {
         AutoContinueSegment {
             visible_text: self.current_segment_visible_text.clone(),
             has_tool_use: self.current_segment_has_tool_use,
+            done_marker_found: self.current_segment_done_marker_found,
         }
     }
 
@@ -664,6 +818,10 @@ impl StreamContext {
     pub fn reset_auto_continue_segment(&mut self) {
         self.current_segment_visible_text.clear();
         self.current_segment_has_tool_use = false;
+        self.current_segment_done_marker_found = false;
+        if let Some(done_marker_filter) = self.done_marker_filter.as_mut() {
+            done_marker_filter.reset();
+        }
 
         // 自动续写请求会关闭后续上游请求的 thinking 前缀，只让模型继续可见文本。
         // 因此进入下一段前也要把本地 thinking 解析器切到“已处理”状态，
@@ -684,9 +842,8 @@ impl StreamContext {
             Event::ContextUsage(context_usage) => {
                 // 从上下文使用百分比计算实际的 input_tokens
                 let window_size = get_context_window_size(&self.model);
-                let actual_input_tokens = (context_usage.context_usage_percentage
-                    * (window_size as f64)
-                    / 100.0) as i32;
+                let actual_input_tokens =
+                    (context_usage.context_usage_percentage * (window_size as f64) / 100.0) as i32;
                 self.context_input_tokens = Some(actual_input_tokens);
                 // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                 if context_usage.context_usage_percentage >= 100.0 {
@@ -896,6 +1053,53 @@ impl StreamContext {
     fn create_text_delta_events(&mut self, text: &str) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
+        let Some(done_marker_filter) = self.done_marker_filter.as_mut() else {
+            return self.emit_text_delta_events(text);
+        };
+
+        let filtered = done_marker_filter.push(text);
+        if filtered.marker_found {
+            self.current_segment_done_marker_found = true;
+        }
+
+        if filtered.text.is_empty() {
+            return events;
+        }
+
+        events.extend(self.emit_text_delta_events(&filtered.text));
+
+        events
+    }
+
+    /// 刷新 `[done]` 尾部缓存。
+    pub fn flush_done_marker_filter(&mut self) -> Vec<SseEvent> {
+        let Some(done_marker_filter) = self.done_marker_filter.as_mut() else {
+            return Vec::new();
+        };
+
+        let filtered = done_marker_filter.finish();
+        if filtered.marker_found {
+            self.current_segment_done_marker_found = true;
+        }
+
+        if filtered.text.is_empty() {
+            return Vec::new();
+        }
+
+        self.emit_text_delta_events(&filtered.text)
+    }
+
+    /// 直接创建 text_delta 事件，不做 `[done]` 检测。
+    ///
+    /// 调用方必须保证传入文本已经过完成标记处理，或者是最终确认无法组成完成标记的
+    /// 暂存文本。
+    fn emit_text_delta_events(&mut self, text: &str) -> Vec<SseEvent> {
+        let mut events = Vec::new();
+
+        if text.is_empty() {
+            return events;
+        }
+
         // 记录当前分段的可见文本，供自动续写判断使用
         self.current_segment_visible_text.push_str(text);
 
@@ -1090,6 +1294,11 @@ impl StreamContext {
         events
     }
 
+    /// 覆写最终 stop_reason。
+    pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
+        self.state_manager.set_stop_reason(reason);
+    }
+
     /// 生成最终事件序列
     pub fn generate_final_events(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
@@ -1156,6 +1365,9 @@ impl StreamContext {
             self.thinking_buffer.clear();
         }
 
+        // 流结束时，如果末尾暂存文本最终没有组成 `[done]`，需要发出避免吞字。
+        events.extend(self.flush_done_marker_filter());
+
         // 如果整个流中只产生了 thinking 块，没有 text 也没有 tool_use，
         // 则设置 stop_reason 为 max_tokens（表示模型耗尽了 token 预算在思考上），
         // 并补发一套完整的 text 事件（内容为一个空格），确保 content 数组中有 text 块
@@ -1208,8 +1420,30 @@ impl BufferedStreamContext {
         thinking_enabled: bool,
         tool_name_map: HashMap<String, String>,
     ) -> Self {
-        let inner =
-            StreamContext::new_with_thinking(model, estimated_input_tokens, thinking_enabled, tool_name_map);
+        Self::new_with_done_marker_filter(
+            model,
+            estimated_input_tokens,
+            thinking_enabled,
+            tool_name_map,
+            false,
+        )
+    }
+
+    /// 创建缓冲流上下文，并显式控制是否启用 `[done]` 过滤。
+    pub fn new_with_done_marker_filter(
+        model: impl Into<String>,
+        estimated_input_tokens: i32,
+        thinking_enabled: bool,
+        tool_name_map: HashMap<String, String>,
+        done_marker_filter_enabled: bool,
+    ) -> Self {
+        let inner = StreamContext::new_with_done_marker_filter(
+            model,
+            estimated_input_tokens,
+            thinking_enabled,
+            tool_name_map,
+            done_marker_filter_enabled,
+        );
         Self {
             inner,
             event_buffer: Vec::new(),
@@ -1242,6 +1476,17 @@ impl BufferedStreamContext {
     /// 重置当前分段的自动续写统计
     pub fn reset_auto_continue_segment(&mut self) {
         self.inner.reset_auto_continue_segment();
+    }
+
+    /// 刷新 `[done]` 尾部缓存并写入缓冲事件。
+    pub fn flush_done_marker_filter(&mut self) {
+        let events = self.inner.flush_done_marker_filter();
+        self.event_buffer.extend(events);
+    }
+
+    /// 覆写最终 stop_reason。
+    pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
+        self.inner.set_stop_reason(reason);
     }
 
     /// 完成流处理并返回所有事件
@@ -1357,7 +1602,10 @@ mod tests {
         use crate::kiro::model::events::ToolUseEvent;
 
         let mut map = HashMap::new();
-        map.insert("short_abc12345".to_string(), "mcp__very_long_original_tool_name".to_string());
+        map.insert(
+            "short_abc12345".to_string(),
+            "mcp__very_long_original_tool_name".to_string(),
+        );
 
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, map);
         let _ = ctx.generate_initial_events();
@@ -1373,10 +1621,12 @@ mod tests {
         let events = ctx.process_kiro_event(&tool_event);
 
         // content_block_start 中的 name 应该是原始长名称
-        let start_event = events.iter().find(|e| e.event == "content_block_start").unwrap();
+        let start_event = events
+            .iter()
+            .find(|e| e.event == "content_block_start")
+            .unwrap();
         assert_eq!(
-            start_event.data["content_block"]["name"],
-            "mcp__very_long_original_tool_name",
+            start_event.data["content_block"]["name"], "mcp__very_long_original_tool_name",
             "应还原为原始工具名称"
         );
     }
@@ -1516,6 +1766,140 @@ mod tests {
                     && e.data["delta"]["text"] == "有修改："
             }),
             "flushed text should equal the buffered prefix"
+        );
+    }
+
+    #[test]
+    fn test_strip_done_marker_from_text() {
+        assert_eq!(strip_done_marker_from_text("[done]"), (String::new(), true));
+        assert_eq!(
+            strip_done_marker_from_text("hello\n[done]"),
+            ("hello".to_string(), true)
+        );
+        assert_eq!(
+            strip_done_marker_from_text("hello\n[DONE]\n"),
+            ("hello".to_string(), true)
+        );
+        assert_eq!(
+            strip_done_marker_from_text("hello"),
+            ("hello".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn test_done_marker_split_across_stream_chunks_is_detected_and_hidden() {
+        let mut ctx = StreamContext::new_with_done_marker_filter(
+            "test-model",
+            1,
+            false,
+            HashMap::new(),
+            true,
+        );
+        let _ = ctx.generate_initial_events();
+
+        let first_events = ctx.process_assistant_response("hello\n[do");
+        let first_text: String = first_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(first_text, "");
+        assert!(
+            !ctx.auto_continue_segment().done_marker_found,
+            "partial marker should not be treated as complete"
+        );
+
+        let second_events = ctx.process_assistant_response("ne]");
+        let second_text: String = second_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(second_text, "hello");
+        assert!(
+            ctx.auto_continue_segment().done_marker_found,
+            "split [done] marker should be detected"
+        );
+        assert_eq!(ctx.auto_continue_segment().visible_text, "hello");
+    }
+
+    #[test]
+    fn test_done_marker_split_keeps_trailing_newlines_hidden() {
+        let mut ctx = StreamContext::new_with_done_marker_filter(
+            "test-model",
+            1,
+            false,
+            HashMap::new(),
+            true,
+        );
+        let _ = ctx.generate_initial_events();
+
+        let first_events = ctx.process_assistant_response("hello\n\n[do");
+        let first_text: String = first_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(
+            first_text, "",
+            "whitespace before a possible split [done] marker should be buffered"
+        );
+
+        let second_events = ctx.process_assistant_response("ne]");
+        let second_text: String = second_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(second_text, "hello");
+        assert!(ctx.auto_continue_segment().done_marker_found);
+        assert_eq!(
+            ctx.auto_continue_segment().visible_text,
+            "hello",
+            "the final visible text should not keep marker-only blank lines"
+        );
+    }
+
+    #[test]
+    fn test_whitespace_after_done_marker_chunk_is_hidden() {
+        let mut ctx = StreamContext::new_with_done_marker_filter(
+            "test-model",
+            1,
+            false,
+            HashMap::new(),
+            true,
+        );
+        let _ = ctx.generate_initial_events();
+
+        let first_events = ctx.process_assistant_response("hello[done]");
+        let first_text: String = first_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(first_text, "hello");
+        assert!(ctx.auto_continue_segment().done_marker_found);
+
+        let second_events = ctx.process_assistant_response("\n\n");
+        let second_text: String = second_events
+            .iter()
+            .filter(|e| e.event == "content_block_delta")
+            .filter_map(|e| e.data["delta"]["text"].as_str())
+            .collect();
+
+        assert_eq!(
+            second_text, "",
+            "pure whitespace after [done] should not be sent to the client"
+        );
+        assert_eq!(
+            ctx.auto_continue_segment().visible_text,
+            "hello",
+            "visible text should not gain trailing blank lines after [done]"
         );
     }
 
@@ -1798,7 +2182,12 @@ mod tests {
 
         let full_thinking: String = thinking_deltas
             .iter()
-            .filter(|e| !e.data["delta"]["thinking"].as_str().unwrap_or("").is_empty())
+            .filter(|e| {
+                !e.data["delta"]["thinking"]
+                    .as_str()
+                    .unwrap_or("")
+                    .is_empty()
+            })
             .map(|e| e.data["delta"]["thinking"].as_str().unwrap_or(""))
             .collect();
 
@@ -1811,14 +2200,11 @@ mod tests {
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
         let _initial_events = ctx.generate_initial_events();
 
-        let events =
-            ctx.process_assistant_response("<thinking>\nabc</thinking>\n\n你好");
+        let events = ctx.process_assistant_response("<thinking>\nabc</thinking>\n\n你好");
 
         let text_deltas: Vec<_> = events
             .iter()
-            .filter(|e| {
-                e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta"
-            })
+            .filter(|e| e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta")
             .collect();
 
         let full_text: String = text_deltas
@@ -1850,9 +2236,7 @@ mod tests {
     fn collect_text_content(events: &[SseEvent]) -> String {
         events
             .iter()
-            .filter(|e| {
-                e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta"
-            })
+            .filter(|e| e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta")
             .map(|e| e.data["delta"]["text"].as_str().unwrap_or(""))
             .collect()
     }
@@ -1871,7 +2255,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "你好", "text should be '你好', got: {:?}", text);
@@ -1889,7 +2277,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "你好", "text should be '你好', got: {:?}", text);
@@ -1909,7 +2301,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "text", "text should be 'text', got: {:?}", text);
@@ -1938,7 +2334,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "hello", "thinking should be 'hello', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "hello",
+            "thinking should be 'hello', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "world", "text should be 'world', got: {:?}", text);
@@ -2028,12 +2428,14 @@ mod tests {
 
         let mut all_events = Vec::new();
         all_events.extend(ctx.process_assistant_response("<thinking>\nabc</thinking>"));
-        all_events.extend(ctx.process_tool_use(&crate::kiro::model::events::ToolUseEvent {
-            name: "test_tool".to_string(),
-            tool_use_id: "tool_1".to_string(),
-            input: "{}".to_string(),
-            stop: true,
-        }));
+        all_events.extend(
+            ctx.process_tool_use(&crate::kiro::model::events::ToolUseEvent {
+                name: "test_tool".to_string(),
+                tool_use_id: "tool_1".to_string(),
+                input: "{}".to_string(),
+                stop: true,
+            }),
+        );
         all_events.extend(ctx.generate_final_events());
 
         let message_delta = all_events
