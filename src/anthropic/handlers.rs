@@ -26,19 +26,19 @@ use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::runtime::RuntimeFlags;
 use super::stream::{
-    AutoContinueSegment, BufferedStreamContext, DONE_MARKER, SseEvent, StreamContext,
-    strip_done_marker_from_text,
+    AUTO_CONTINUE_DONE_TOOL_NAME, AutoContinueSegment, BufferedStreamContext, SseEvent,
+    StreamContext,
 };
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, Message, MessagesRequest, Model,
-    ModelsResponse, OutputConfig, Thinking,
+    ModelsResponse, OutputConfig, Thinking, Tool,
 };
 use super::websearch;
 
 /// 自动续写最大轮数，避免异常场景无限循环
-const AUTO_CONTINUE_MAX_ATTEMPTS: usize = 3;
-/// 参考 gcli2api anti_truncation 的续写指令
-const AUTO_CONTINUE_NUDGE_PROMPT: &str = "Continue your last message without repeating its original content.And output \"[done]\" upon completion：";
+const AUTO_CONTINUE_MAX_ATTEMPTS: usize = 1;
+/// 续写指令：要求继续上次输出，并在完成时调用内部完成信号工具。
+const AUTO_CONTINUE_NUDGE_PROMPT: &str = "Continue your last message without repeating its original content. When the answer is fully complete, call the auto_continue_done tool.";
 /// 触发自动续写所需的最小可见文本长度
 const AUTO_CONTINUE_MIN_VISIBLE_CHARS: usize = 5;
 
@@ -50,10 +50,34 @@ fn should_auto_continue(segment: &AutoContinueSegment) -> bool {
     segment.visible_text.trim().chars().count() > AUTO_CONTINUE_MIN_VISIBLE_CHARS
 }
 
+fn auto_continue_done_tool() -> Tool {
+    let mut input_schema = std::collections::HashMap::new();
+    input_schema.insert("type".to_string(), serde_json::json!("object"));
+    input_schema.insert("properties".to_string(), serde_json::json!({}));
+    input_schema.insert("additionalProperties".to_string(), serde_json::json!(false));
+
+    Tool {
+        tool_type: None,
+        name: AUTO_CONTINUE_DONE_TOOL_NAME.to_string(),
+        description: "Call this tool exactly once when your answer is fully complete. This is an internal completion signal; do not mention it in normal text.".to_string(),
+        input_schema,
+        max_uses: None,
+    }
+}
+
 fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
+    let tools = payload.tools.get_or_insert_with(Vec::new);
+    if !tools
+        .iter()
+        .any(|tool| tool.name == AUTO_CONTINUE_DONE_TOOL_NAME)
+    {
+        tools.push(auto_continue_done_tool());
+    }
+
     let instruction = format!(
-        "重要：当你完成完整回答时，必须在最后单独一行输出：{DONE_MARKER}\n\
-{DONE_MARKER} 是必需的结束标记。不要解释这个标记，不要省略这个标记。"
+        "重要：当你完成完整回答时，必须调用 `{}` 工具作为结束信号。\n\
+不要在正文里解释这个工具，不要输出任何文本结束标记。",
+        AUTO_CONTINUE_DONE_TOOL_NAME
     );
 
     let Some(last_message) = payload.messages.last_mut() else {
@@ -66,7 +90,7 @@ fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
 
     match &mut last_message.content {
         serde_json::Value::String(text) => {
-            if !text.contains(DONE_MARKER) {
+            if !text.contains(AUTO_CONTINUE_DONE_TOOL_NAME) {
                 text.push_str("\n\n");
                 text.push_str(&instruction);
             }
@@ -76,7 +100,7 @@ fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
                 block
                     .get("text")
                     .and_then(|value| value.as_str())
-                    .is_some_and(|text| text.contains(DONE_MARKER))
+                    .is_some_and(|text| text.contains(AUTO_CONTINUE_DONE_TOOL_NAME))
             });
             if !has_instruction {
                 blocks.push(serde_json::json!({ "type": "text", "text": instruction }));
@@ -471,13 +495,8 @@ async fn handle_stream_request(
     };
 
     // 创建流处理上下文
-    let mut ctx = StreamContext::new_with_done_marker_filter(
-        model,
-        input_tokens,
-        thinking_enabled,
-        tool_name_map,
-        runtime_flags.auto_continue_enabled(),
-    );
+    let mut ctx =
+        StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
 
     // 生成初始事件
     let initial_events = ctx.generate_initial_events();
@@ -632,32 +651,6 @@ fn create_sse_stream(
                                 ));
                             }
                             None => {
-                                let pending_events = ctx.flush_done_marker_filter();
-                                if !pending_events.is_empty() {
-                                    let bytes: Vec<Result<Bytes, Infallible>> = pending_events
-                                        .into_iter()
-                                        .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                        .collect();
-
-                                    return Some((
-                                        stream::iter(bytes),
-                                        (
-                                            provider,
-                                            request_template,
-                                            body_stream,
-                                            ctx,
-                                            decoder,
-                                            false,
-                                            ping_interval,
-                                            request_started_at,
-                                            continue_count,
-                                            thinking_enabled,
-                                            runtime_flags,
-                                            accumulated_visible_text,
-                                        ),
-                                    ));
-                                }
-
                                 let segment = ctx.auto_continue_segment();
                                 let elapsed = request_started_at.elapsed();
                                 let can_continue = runtime_flags.auto_continue_enabled()
@@ -771,7 +764,6 @@ fn parse_non_stream_segment(
     model: &str,
     thinking_enabled: bool,
     tool_name_map: &std::collections::HashMap<String, String>,
-    done_marker_filter_enabled: bool,
 ) -> NonStreamSegmentResult {
     let mut decoder = EventStreamDecoder::new();
     if let Err(e) = decoder.feed(body_bytes) {
@@ -796,6 +788,11 @@ fn parse_non_stream_segment(
                             text_content.push_str(&resp.content);
                         }
                         Event::ToolUse(tool_use) => {
+                            if tool_use.name == AUTO_CONTINUE_DONE_TOOL_NAME {
+                                done_marker_found = true;
+                                continue;
+                            }
+
                             has_tool_use = true;
                             let buffer = tool_json_buffers
                                 .entry(tool_use.tool_use_id.clone())
@@ -869,13 +866,6 @@ fn parse_non_stream_segment(
     if thinking_enabled {
         let (thinking, remaining_text) =
             super::stream::extract_thinking_from_complete_text(&text_content);
-        let remaining_text = if done_marker_filter_enabled {
-            let (cleaned_text, marker_found) = strip_done_marker_from_text(&remaining_text);
-            done_marker_found = marker_found;
-            cleaned_text
-        } else {
-            remaining_text
-        };
 
         if let Some(thinking_text) = thinking {
             content.push(json!({
@@ -893,13 +883,7 @@ fn parse_non_stream_segment(
 
         visible_text = remaining_text;
     } else if !text_content.is_empty() {
-        let cleaned_text = if done_marker_filter_enabled {
-            let (cleaned_text, marker_found) = strip_done_marker_from_text(&text_content);
-            done_marker_found = marker_found;
-            cleaned_text
-        } else {
-            text_content.clone()
-        };
+        let cleaned_text = text_content.clone();
         content.push(json!({
             "type": "text",
             "text": cleaned_text.clone()
@@ -960,13 +944,8 @@ async fn handle_non_stream_request(
             }
         };
 
-        let segment = parse_non_stream_segment(
-            &body_bytes,
-            model,
-            thinking_enabled,
-            &tool_name_map,
-            runtime_flags.auto_continue_enabled(),
-        );
+        let segment =
+            parse_non_stream_segment(&body_bytes, model, thinking_enabled, &tool_name_map);
         let elapsed = request_started_at.elapsed();
 
         if continue_count == 0 {
@@ -1286,12 +1265,11 @@ async fn handle_stream_request_buffered(
     };
 
     // 创建缓冲流处理上下文
-    let ctx = BufferedStreamContext::new_with_done_marker_filter(
+    let ctx = BufferedStreamContext::new(
         model,
         estimated_input_tokens,
         thinking_enabled,
         tool_name_map,
-        runtime_flags.auto_continue_enabled(),
     );
 
     // 创建缓冲 SSE 流
@@ -1437,8 +1415,6 @@ fn create_buffered_sse_stream(
                                 ));
                             }
                             None => {
-                                ctx.flush_done_marker_filter();
-
                                 let segment = ctx.auto_continue_segment();
                                 let elapsed = request_started_at.elapsed();
                                 let can_continue = runtime_flags.auto_continue_enabled()
