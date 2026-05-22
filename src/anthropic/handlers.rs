@@ -31,7 +31,7 @@ use super::stream::{
 };
 use super::types::{
     CountTokensRequest, CountTokensResponse, ErrorResponse, Message, MessagesRequest, Model,
-    ModelsResponse, OutputConfig, SystemMessage, Thinking,
+    ModelsResponse, OutputConfig, Thinking,
 };
 use super::websearch;
 
@@ -52,17 +52,37 @@ fn should_auto_continue(segment: &AutoContinueSegment) -> bool {
 
 fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
     let instruction = format!(
-        "严格执行以下输出结束规则：\n\n\
-1. 当你完成完整回答时，必须在输出的最后单独一行输出：{DONE_MARKER}\n\
-2. {DONE_MARKER} 标记表示你的回答已经完全结束，这是必需的结束标记\n\
-3. 无论回答长短，都必须以 {DONE_MARKER} 标记结束\n\n\
-注意：{DONE_MARKER} 必须单独占一行，前面不要有任何其他字符。"
+        "重要：当你完成完整回答时，必须在最后单独一行输出：{DONE_MARKER}\n\
+{DONE_MARKER} 是必需的结束标记。不要解释这个标记，不要省略这个标记。"
     );
 
-    let system = payload.system.get_or_insert_with(Vec::new);
-    let has_instruction = system.iter().any(|msg| msg.text.contains(DONE_MARKER));
-    if !has_instruction {
-        system.push(SystemMessage { text: instruction });
+    let Some(last_message) = payload.messages.last_mut() else {
+        return;
+    };
+
+    if last_message.role != "user" {
+        return;
+    }
+
+    match &mut last_message.content {
+        serde_json::Value::String(text) => {
+            if !text.contains(DONE_MARKER) {
+                text.push_str("\n\n");
+                text.push_str(&instruction);
+            }
+        }
+        serde_json::Value::Array(blocks) => {
+            let has_instruction = blocks.iter().any(|block| {
+                block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| text.contains(DONE_MARKER))
+            });
+            if !has_instruction {
+                blocks.push(serde_json::json!({ "type": "text", "text": instruction }));
+            }
+        }
+        _ => {}
     }
 }
 
