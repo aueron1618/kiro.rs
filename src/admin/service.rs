@@ -13,7 +13,8 @@ use crate::kiro::token_manager::MultiTokenManager;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, AutoContinueConfigResponse, BalanceResponse,
+    AddCredentialRequest, AddCredentialResponse, AutoContinueConfigResponse,
+    AutoContinueConfigUpdateRequest, AutoContinueRequestRecordResponse, BalanceResponse,
     CredentialStatusItem, CredentialsStatusResponse, LoadBalancingModeResponse,
     SetAutoContinueConfigRequest, SetLoadBalancingModeRequest,
 };
@@ -310,9 +311,7 @@ impl AdminService {
 
     /// 获取自动续写开关状态
     pub fn get_auto_continue_config(&self) -> AutoContinueConfigResponse {
-        AutoContinueConfigResponse {
-            enabled: self.runtime_flags.auto_continue_enabled(),
-        }
+        AutoContinueConfigResponse::from(self.runtime_flags.auto_continue_config_snapshot())
     }
 
     /// 设置自动续写开关（即时生效，并尽量持久化到 config.json）
@@ -320,12 +319,52 @@ impl AdminService {
         &self,
         req: SetAutoContinueConfigRequest,
     ) -> Result<AutoContinueConfigResponse, AdminServiceError> {
-        let previous = self.runtime_flags.auto_continue_enabled();
-        if previous == req.enabled {
-            return Ok(AutoContinueConfigResponse { enabled: req.enabled });
+        self.update_auto_continue_config(AutoContinueConfigUpdateRequest {
+            enabled: Some(req.enabled),
+            stop_reason_check_enabled: None,
+            done_tool_check_enabled: None,
+            max_attempts: None,
+            prompt: None,
+        })
+    }
+
+    /// 更新自动续写配置（即时生效，并尽量持久化到 config.json）
+    pub fn update_auto_continue_config(
+        &self,
+        req: AutoContinueConfigUpdateRequest,
+    ) -> Result<AutoContinueConfigResponse, AdminServiceError> {
+        let previous = self.runtime_flags.auto_continue_config_snapshot();
+
+        let new_enabled = req.enabled.unwrap_or(previous.enabled);
+        let new_stop_reason_check_enabled = req
+            .stop_reason_check_enabled
+            .unwrap_or(previous.stop_reason_check_enabled);
+        let new_done_tool_check_enabled = req
+            .done_tool_check_enabled
+            .unwrap_or(previous.done_tool_check_enabled);
+        let new_max_attempts = req.max_attempts.unwrap_or(previous.max_attempts).min(20);
+        let new_prompt = req.prompt.unwrap_or_else(|| previous.prompt.clone());
+
+        if new_max_attempts == 0 {
+            return Err(AdminServiceError::InvalidCredential(
+                "续写次数必须大于 0".to_string(),
+            ));
+        }
+        if new_prompt.trim().is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "续写提示词不能为空".to_string(),
+            ));
         }
 
-        self.runtime_flags.set_auto_continue_enabled(req.enabled);
+        self.runtime_flags.set_auto_continue_enabled(new_enabled);
+        self.runtime_flags
+            .set_auto_continue_stop_reason_check_enabled(new_stop_reason_check_enabled);
+        self.runtime_flags
+            .set_auto_continue_done_tool_check_enabled(new_done_tool_check_enabled);
+        self.runtime_flags
+            .set_auto_continue_max_attempts(new_max_attempts);
+        self.runtime_flags
+            .set_auto_continue_prompt(new_prompt.clone());
 
         let config_path = self
             .config
@@ -336,24 +375,52 @@ impl AdminService {
         if let Some(config_path) = config_path {
             let persist_result = (|| -> anyhow::Result<()> {
                 let mut config = Config::load(config_path)?;
-                config.auto_continue_enabled = req.enabled;
+                config.auto_continue_enabled = new_enabled;
+                config.auto_continue_stop_reason_check_enabled = new_stop_reason_check_enabled;
+                config.auto_continue_done_tool_check_enabled = new_done_tool_check_enabled;
+                config.auto_continue_max_attempts = new_max_attempts;
+                config.auto_continue_prompt = new_prompt.clone();
                 config.save()
             })();
 
             if let Err(err) = persist_result {
-                self.runtime_flags.set_auto_continue_enabled(previous);
+                self.runtime_flags
+                    .set_auto_continue_enabled(previous.enabled);
+                self.runtime_flags
+                    .set_auto_continue_stop_reason_check_enabled(
+                        previous.stop_reason_check_enabled,
+                    );
+                self.runtime_flags
+                    .set_auto_continue_done_tool_check_enabled(previous.done_tool_check_enabled);
+                self.runtime_flags
+                    .set_auto_continue_max_attempts(previous.max_attempts);
+                self.runtime_flags.set_auto_continue_prompt(previous.prompt);
                 return Err(AdminServiceError::InternalError(err.to_string()));
             }
 
             if let Ok(mut runtime_config) = self.config.write() {
-                runtime_config.auto_continue_enabled = req.enabled;
+                runtime_config.auto_continue_enabled = new_enabled;
+                runtime_config.auto_continue_stop_reason_check_enabled =
+                    new_stop_reason_check_enabled;
+                runtime_config.auto_continue_done_tool_check_enabled = new_done_tool_check_enabled;
+                runtime_config.auto_continue_max_attempts = new_max_attempts;
+                runtime_config.auto_continue_prompt = new_prompt;
             }
         } else {
-            tracing::warn!("配置文件路径未知，自动续写开关仅在当前进程生效: {}", req.enabled);
+            tracing::warn!("配置文件路径未知，自动续写配置仅在当前进程生效");
         }
 
-        tracing::info!("自动续写开关已设置为: {}", req.enabled);
-        Ok(AutoContinueConfigResponse { enabled: req.enabled })
+        tracing::info!("自动续写配置已更新");
+        Ok(self.get_auto_continue_config())
+    }
+
+    /// 获取自动续写请求记录
+    pub fn get_auto_continue_requests(&self) -> Vec<AutoContinueRequestRecordResponse> {
+        self.runtime_flags
+            .auto_continue_requests()
+            .into_iter()
+            .map(AutoContinueRequestRecordResponse::from)
+            .collect()
     }
 
     /// 强制刷新指定凭据的 Token
@@ -505,7 +572,8 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)

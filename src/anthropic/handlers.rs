@@ -22,9 +22,9 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use super::converter::{ConversionError, convert_request};
+use super::converter::{ConversionError, convert_request, get_context_window_size};
 use super::middleware::AppState;
-use super::runtime::RuntimeFlags;
+use super::runtime::{AutoContinueRecordInput, RuntimeFlags};
 use super::stream::{
     AUTO_CONTINUE_DONE_TOOL_NAME, AutoContinueSegment, BufferedStreamContext, SseEvent,
     StreamContext,
@@ -35,15 +35,27 @@ use super::types::{
 };
 use super::websearch;
 
-/// 自动续写最大轮数，避免异常场景无限循环
-const AUTO_CONTINUE_MAX_ATTEMPTS: usize = 1;
-/// 续写指令：要求继续上次输出，并在完成时调用内部完成信号工具。
-const AUTO_CONTINUE_NUDGE_PROMPT: &str = "Continue your last message without repeating its original content. When the answer is fully complete, call the auto_continue_done tool.";
 /// 触发自动续写所需的最小可见文本长度
 const AUTO_CONTINUE_MIN_VISIBLE_CHARS: usize = 5;
 
-fn should_auto_continue(segment: &AutoContinueSegment) -> bool {
-    if segment.done_marker_found || segment.has_tool_use {
+fn should_auto_continue(segment: &AutoContinueSegment, runtime_flags: &RuntimeFlags) -> bool {
+    if segment.has_tool_use {
+        return false;
+    }
+
+    if runtime_flags.auto_continue_stop_reason_check_enabled() {
+        match segment.stop_reason.as_str() {
+            "max_tokens" => {}
+            "end_turn" => return false,
+            "tool_use" | "model_context_window_exceeded" => return false,
+            _ => return false,
+        }
+    }
+
+    if runtime_flags.auto_continue_done_tool_check_enabled()
+        && segment.done_marker_found
+        && segment.stop_reason == "max_tokens"
+    {
         return false;
     }
 
@@ -113,6 +125,7 @@ fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
 fn build_auto_continue_payload(
     payload: &MessagesRequest,
     accumulated_assistant_text: &str,
+    continue_prompt: &str,
 ) -> MessagesRequest {
     let mut next_payload = payload.clone();
 
@@ -139,7 +152,7 @@ fn build_auto_continue_payload(
     });
     next_payload.messages.push(Message {
         role: "user".to_string(),
-        content: serde_json::Value::String(AUTO_CONTINUE_NUDGE_PROMPT.to_string()),
+        content: serde_json::Value::String(continue_prompt.to_string()),
     });
     next_payload
 }
@@ -159,8 +172,9 @@ fn build_request_body(payload: &MessagesRequest) -> anyhow::Result<String> {
 fn prepare_auto_continue_request(
     payload: &MessagesRequest,
     assistant_text: &str,
+    continue_prompt: &str,
 ) -> anyhow::Result<(MessagesRequest, String)> {
-    let next_payload = build_auto_continue_payload(payload, assistant_text);
+    let next_payload = build_auto_continue_payload(payload, assistant_text, continue_prompt);
     let next_request_body = build_request_body(&next_payload)?;
     Ok((next_payload, next_request_body))
 }
@@ -385,7 +399,9 @@ pub async fn post_messages(
         return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
     }
 
-    if state.runtime_flags.auto_continue_enabled() {
+    if state.runtime_flags.auto_continue_enabled()
+        && state.runtime_flags.auto_continue_done_tool_check_enabled()
+    {
         apply_auto_continue_instruction(&mut payload);
     }
 
@@ -549,6 +565,7 @@ fn create_sse_stream(
         (
             provider,
             request_template,
+            std::time::SystemTime::now(),
             response.bytes_stream(),
             ctx,
             EventStreamDecoder::new(),
@@ -559,10 +576,12 @@ fn create_sse_stream(
             thinking_enabled,
             runtime_flags,
             String::new(),
+            Vec::<String>::new(),
         ),
         |(
             provider,
             request_template,
+            request_record_started_at,
             mut body_stream,
             mut ctx,
             mut decoder,
@@ -573,6 +592,7 @@ fn create_sse_stream(
             thinking_enabled,
             runtime_flags,
             mut accumulated_visible_text,
+            mut stop_reasons,
         )| async move {
             if finished {
                 return None;
@@ -611,6 +631,7 @@ fn create_sse_stream(
                                     (
                                         provider,
                                         request_template,
+                                        request_record_started_at,
                                         body_stream,
                                         ctx,
                                         decoder,
@@ -621,11 +642,27 @@ fn create_sse_stream(
                                         thinking_enabled,
                                         runtime_flags,
                                         accumulated_visible_text,
+                                        stop_reasons,
                                     ),
                                 ));
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
+                                let segment = ctx.auto_continue_segment();
+                                let final_stop_reason = segment.stop_reason.clone();
+                                stop_reasons.push(final_stop_reason);
+                                let input_tokens = ctx.final_input_tokens();
+                                let output_tokens = ctx.output_tokens;
+                                runtime_flags.record_auto_continue_request(AutoContinueRecordInput {
+                                    started_at: request_record_started_at,
+                                    duration: request_record_started_at.elapsed().unwrap_or_default(),
+                                    input_tokens,
+                                    output_tokens,
+                                    continuation_count: continue_count,
+                                    stop_reasons: stop_reasons.clone(),
+                                    done_marker_found: segment.done_marker_found,
+                                    has_tool_use: segment.has_tool_use,
+                                });
                                 let final_events = ctx.generate_final_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                     .into_iter()
@@ -637,6 +674,7 @@ fn create_sse_stream(
                                     (
                                         provider,
                                         request_template,
+                                        request_record_started_at,
                                         body_stream,
                                         ctx,
                                         decoder,
@@ -647,19 +685,21 @@ fn create_sse_stream(
                                         thinking_enabled,
                                         runtime_flags,
                                         accumulated_visible_text,
+                                        stop_reasons,
                                     ),
                                 ));
                             }
                             None => {
                                 let segment = ctx.auto_continue_segment();
                                 let elapsed = request_started_at.elapsed();
+                                stop_reasons.push(segment.stop_reason.clone());
                                 let can_continue = runtime_flags.auto_continue_enabled()
-                                    && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
-                                    && should_auto_continue(&segment);
+                                    && continue_count < runtime_flags.auto_continue_max_attempts()
+                                    && should_auto_continue(&segment, &runtime_flags);
 
                                 if can_continue {
                                     accumulated_visible_text.push_str(&segment.visible_text);
-                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text) {
+                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
                                         Ok((next_payload, next_request_body)) => {
                                             tracing::info!(
                                                 "触发自动续写（流式）：第 {} 轮，{}",
@@ -674,6 +714,7 @@ fn create_sse_stream(
                                                     request_started_at = std::time::Instant::now();
                                                     continue_count += 1;
                                                     ctx.reset_auto_continue_segment();
+                                                    stop_reasons.pop();
                                                     continue;
                                                 }
                                                 Err(err) => {
@@ -688,9 +729,25 @@ fn create_sse_stream(
                                     }
                                 }
 
-                                if runtime_flags.auto_continue_enabled() && !segment.done_marker_found && !segment.has_tool_use {
+                                if runtime_flags.auto_continue_enabled() && segment.stop_reason == "max_tokens" && !segment.has_tool_use {
                                     ctx.set_stop_reason("max_tokens");
                                 }
+                                let final_segment = ctx.auto_continue_segment();
+                                if let Some(last_reason) = stop_reasons.last_mut() {
+                                    *last_reason = final_segment.stop_reason.clone();
+                                }
+                                let input_tokens = ctx.final_input_tokens();
+                                let output_tokens = ctx.output_tokens;
+                                runtime_flags.record_auto_continue_request(AutoContinueRecordInput {
+                                    started_at: request_record_started_at,
+                                    duration: request_record_started_at.elapsed().unwrap_or_default(),
+                                    input_tokens,
+                                    output_tokens,
+                                    continuation_count: continue_count,
+                                    stop_reasons: stop_reasons.clone(),
+                                    done_marker_found: final_segment.done_marker_found,
+                                    has_tool_use: final_segment.has_tool_use,
+                                });
                                 let final_events = ctx.generate_final_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                     .into_iter()
@@ -702,6 +759,7 @@ fn create_sse_stream(
                                     (
                                         provider,
                                         request_template,
+                                        request_record_started_at,
                                         body_stream,
                                         ctx,
                                         decoder,
@@ -712,6 +770,7 @@ fn create_sse_stream(
                                         thinking_enabled,
                                         runtime_flags,
                                         accumulated_visible_text,
+                                        stop_reasons,
                                     ),
                                 ));
                             }
@@ -726,6 +785,7 @@ fn create_sse_stream(
                             (
                                 provider,
                                 request_template,
+                                request_record_started_at,
                                 body_stream,
                                 ctx,
                                 decoder,
@@ -736,6 +796,7 @@ fn create_sse_stream(
                                 thinking_enabled,
                                 runtime_flags,
                                 accumulated_visible_text,
+                                stop_reasons,
                             ),
                         ));
                     }
@@ -747,8 +808,6 @@ fn create_sse_stream(
 
     initial_stream.chain(processing_stream)
 }
-
-use super::converter::get_context_window_size;
 
 struct NonStreamSegmentResult {
     content: Vec<serde_json::Value>,
@@ -914,6 +973,7 @@ async fn handle_non_stream_request(
     runtime_flags: Arc<RuntimeFlags>,
     tool_name_map: std::collections::HashMap<String, String>,
 ) -> Response {
+    let request_record_started_at = std::time::SystemTime::now();
     let current_request_template = request_template;
     let mut current_request_body = request_body.to_string();
     let mut continue_count = 0usize;
@@ -921,6 +981,9 @@ async fn handle_non_stream_request(
     let mut aggregated_visible_text = String::new();
     let mut final_content: Vec<serde_json::Value> = Vec::new();
     let mut stop_reason: String;
+    let mut stop_reasons: Vec<String> = Vec::new();
+    let mut final_done_marker_found;
+    let mut final_has_tool_use;
 
     loop {
         let request_started_at = std::time::Instant::now();
@@ -953,6 +1016,9 @@ async fn handle_non_stream_request(
         }
 
         stop_reason = segment.stop_reason.clone();
+        final_done_marker_found = segment.done_marker_found;
+        final_has_tool_use = segment.has_tool_use;
+        stop_reasons.push(segment.stop_reason.clone());
 
         if !segment.visible_text.is_empty() {
             aggregated_visible_text.push_str(&segment.visible_text);
@@ -966,11 +1032,12 @@ async fn handle_non_stream_request(
             visible_text: segment.visible_text.clone(),
             has_tool_use: segment.has_tool_use,
             done_marker_found: segment.done_marker_found,
+            stop_reason: segment.stop_reason.clone(),
         };
 
         let can_continue = runtime_flags.auto_continue_enabled()
-            && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
-            && should_auto_continue(&segment_snapshot);
+            && continue_count < runtime_flags.auto_continue_max_attempts()
+            && should_auto_continue(&segment_snapshot, &runtime_flags);
 
         if !can_continue {
             if !thinking_enabled && !segment.has_tool_use {
@@ -984,7 +1051,7 @@ async fn handle_non_stream_request(
                 };
             }
             if runtime_flags.auto_continue_enabled()
-                && !segment.done_marker_found
+                && segment.stop_reason == "max_tokens"
                 && !segment.has_tool_use
             {
                 stop_reason = "max_tokens".to_string();
@@ -992,7 +1059,11 @@ async fn handle_non_stream_request(
             break;
         }
 
-        match prepare_auto_continue_request(&current_request_template, &aggregated_visible_text) {
+        match prepare_auto_continue_request(
+            &current_request_template,
+            &aggregated_visible_text,
+            &runtime_flags.auto_continue_prompt(),
+        ) {
             Ok((next_payload, next_request_body)) => {
                 tracing::info!(
                     "触发自动续写（非流式）：第 {} 轮，{}",
@@ -1002,6 +1073,7 @@ async fn handle_non_stream_request(
                 let _ = next_payload;
                 current_request_body = next_request_body;
                 continue_count += 1;
+                stop_reasons.pop();
             }
             Err(err) => {
                 tracing::warn!("构建自动续写请求失败，返回当前结果: {}", err);
@@ -1020,7 +1092,20 @@ async fn handle_non_stream_request(
         }
     }
 
+    if let Some(last_reason) = stop_reasons.last_mut() {
+        *last_reason = stop_reason.clone();
+    }
     let output_tokens = token::estimate_output_tokens(&final_content);
+    runtime_flags.record_auto_continue_request(AutoContinueRecordInput {
+        started_at: request_record_started_at,
+        duration: request_record_started_at.elapsed().unwrap_or_default(),
+        input_tokens: final_input_tokens,
+        output_tokens,
+        continuation_count: continue_count,
+        stop_reasons: stop_reasons.clone(),
+        done_marker_found: final_done_marker_found,
+        has_tool_use: final_has_tool_use,
+    });
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
         "type": "message",
@@ -1152,7 +1237,9 @@ pub async fn post_messages_cc(
         return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
     }
 
-    if state.runtime_flags.auto_continue_enabled() {
+    if state.runtime_flags.auto_continue_enabled()
+        && state.runtime_flags.auto_continue_done_tool_check_enabled()
+    {
         apply_auto_continue_instruction(&mut payload);
     }
 
@@ -1313,6 +1400,7 @@ fn create_buffered_sse_stream(
         (
             provider,
             request_template,
+            std::time::SystemTime::now(),
             body_stream,
             ctx,
             EventStreamDecoder::new(),
@@ -1323,10 +1411,12 @@ fn create_buffered_sse_stream(
             thinking_enabled,
             runtime_flags,
             String::new(),
+            Vec::<String>::new(),
         ),
         |(
             provider,
             request_template,
+            request_record_started_at,
             mut body_stream,
             mut ctx,
             mut decoder,
@@ -1337,6 +1427,7 @@ fn create_buffered_sse_stream(
             thinking_enabled,
             runtime_flags,
             mut accumulated_visible_text,
+            mut stop_reasons,
         )| async move {
             if finished {
                 return None;
@@ -1354,6 +1445,7 @@ fn create_buffered_sse_stream(
                             (
                                 provider,
                                 request_template,
+                                request_record_started_at,
                                 body_stream,
                                 ctx,
                                 decoder,
@@ -1364,6 +1456,7 @@ fn create_buffered_sse_stream(
                                 thinking_enabled,
                                 runtime_flags,
                                 accumulated_visible_text,
+                                stop_reasons,
                             ),
                         ));
                     }
@@ -1391,6 +1484,20 @@ fn create_buffered_sse_stream(
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
+                                let segment = ctx.auto_continue_segment();
+                                stop_reasons.push(segment.stop_reason.clone());
+                                let input_tokens = ctx.final_input_tokens();
+                                let output_tokens = segment.estimated_output_tokens();
+                                runtime_flags.record_auto_continue_request(AutoContinueRecordInput {
+                                    started_at: request_record_started_at,
+                                    duration: request_record_started_at.elapsed().unwrap_or_default(),
+                                    input_tokens,
+                                    output_tokens,
+                                    continuation_count: continue_count,
+                                    stop_reasons: stop_reasons.clone(),
+                                    done_marker_found: segment.done_marker_found,
+                                    has_tool_use: segment.has_tool_use,
+                                });
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
@@ -1401,6 +1508,7 @@ fn create_buffered_sse_stream(
                                     (
                                         provider,
                                         request_template,
+                                        request_record_started_at,
                                         body_stream,
                                         ctx,
                                         decoder,
@@ -1411,19 +1519,21 @@ fn create_buffered_sse_stream(
                                         thinking_enabled,
                                         runtime_flags,
                                         accumulated_visible_text,
+                                        stop_reasons,
                                     ),
                                 ));
                             }
                             None => {
                                 let segment = ctx.auto_continue_segment();
                                 let elapsed = request_started_at.elapsed();
+                                stop_reasons.push(segment.stop_reason.clone());
                                 let can_continue = runtime_flags.auto_continue_enabled()
-                                    && continue_count < AUTO_CONTINUE_MAX_ATTEMPTS
-                                    && should_auto_continue(&segment);
+                                    && continue_count < runtime_flags.auto_continue_max_attempts()
+                                    && should_auto_continue(&segment, &runtime_flags);
 
                                 if can_continue {
                                     accumulated_visible_text.push_str(&segment.visible_text);
-                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text) {
+                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
                                         Ok((next_payload, next_request_body)) => {
                                             tracing::info!(
                                                 "触发自动续写（缓冲流）：第 {} 轮，{}",
@@ -1438,6 +1548,7 @@ fn create_buffered_sse_stream(
                                                     request_started_at = std::time::Instant::now();
                                                     continue_count += 1;
                                                     ctx.reset_auto_continue_segment();
+                                                    stop_reasons.pop();
                                                     continue;
                                                 }
                                      Err(err) => {
@@ -1452,9 +1563,23 @@ fn create_buffered_sse_stream(
                                     }
                                 }
 
-                                if runtime_flags.auto_continue_enabled() && !segment.done_marker_found && !segment.has_tool_use {
+                                if runtime_flags.auto_continue_enabled() && segment.stop_reason == "max_tokens" && !segment.has_tool_use {
                                     ctx.set_stop_reason("max_tokens");
                                 }
+                                let final_segment = ctx.auto_continue_segment();
+                                if let Some(last_reason) = stop_reasons.last_mut() { *last_reason = final_segment.stop_reason.clone(); }
+                                let input_tokens = ctx.final_input_tokens();
+                                let output_tokens = final_segment.estimated_output_tokens();
+                                runtime_flags.record_auto_continue_request(AutoContinueRecordInput {
+                                    started_at: request_record_started_at,
+                                    duration: request_record_started_at.elapsed().unwrap_or_default(),
+                                    input_tokens,
+                                    output_tokens,
+                                    continuation_count: continue_count,
+                                    stop_reasons: stop_reasons.clone(),
+                                    done_marker_found: final_segment.done_marker_found,
+                                    has_tool_use: final_segment.has_tool_use,
+                                });
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
@@ -1465,6 +1590,7 @@ fn create_buffered_sse_stream(
                                     (
                                         provider,
                                         request_template,
+                                        request_record_started_at,
                                         body_stream,
                                         ctx,
                                         decoder,
@@ -1475,6 +1601,7 @@ fn create_buffered_sse_stream(
                                         thinking_enabled,
                                         runtime_flags,
                                         accumulated_visible_text,
+                                        stop_reasons,
                                     ),
                                 ));
                             }

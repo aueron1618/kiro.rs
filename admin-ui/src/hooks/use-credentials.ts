@@ -12,8 +12,10 @@ import {
   setLoadBalancingMode,
   getAutoContinueConfig,
   setAutoContinueConfig,
+  updateAutoContinueConfig,
+  getAutoContinueRequests,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, AutoContinueConfigUpdateRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -137,5 +139,27 @@ export function useSetAutoContinueConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['autoContinueConfig'] })
     },
+  })
+}
+
+
+// 更新自动续写完整配置
+export function useUpdateAutoContinueConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: AutoContinueConfigUpdateRequest) => updateAutoContinueConfig(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['autoContinueConfig'] })
+    },
+  })
+}
+
+// 获取自动续写请求记录
+export function useAutoContinueRequests(autoRefresh = true) {
+  return useQuery({
+    queryKey: ['autoContinueRequests'],
+    queryFn: getAutoContinueRequests,
+    refetchInterval: autoRefresh ? 5000 : false,
+    refetchIntervalInBackground: true,
   })
 }

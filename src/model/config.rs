@@ -102,6 +102,22 @@ pub struct Config {
     #[serde(default = "default_auto_continue_enabled")]
     pub auto_continue_enabled: bool,
 
+    /// 自动续写是否优先按 stop_reason 判定（默认 true）
+    #[serde(default = "default_auto_continue_stop_reason_check_enabled")]
+    pub auto_continue_stop_reason_check_enabled: bool,
+
+    /// 自动续写是否使用内部结束工具作为二级判定（默认 true）
+    #[serde(default = "default_auto_continue_done_tool_check_enabled")]
+    pub auto_continue_done_tool_check_enabled: bool,
+
+    /// 自动续写最大轮数，避免异常场景无限循环（默认 3）
+    #[serde(default = "default_auto_continue_max_attempts")]
+    pub auto_continue_max_attempts: usize,
+
+    /// 自动续写提示词
+    #[serde(default = "default_auto_continue_prompt")]
+    pub auto_continue_prompt: String,
+
     /// 默认端点名称（凭据未显式指定 endpoint 时使用，默认 "ide"）
     #[serde(default = "default_endpoint")]
     pub default_endpoint: String,
@@ -163,6 +179,22 @@ fn default_auto_continue_enabled() -> bool {
     true
 }
 
+fn default_auto_continue_stop_reason_check_enabled() -> bool {
+    true
+}
+
+fn default_auto_continue_done_tool_check_enabled() -> bool {
+    true
+}
+
+fn default_auto_continue_max_attempts() -> usize {
+    3
+}
+
+fn default_auto_continue_prompt() -> String {
+    "Continue your last message without repeating its original content. When the answer is fully complete, call the auto_continue_done tool.".to_string()
+}
+
 fn default_endpoint() -> String {
     crate::kiro::endpoint::ide::IDE_ENDPOINT_NAME.to_string()
 }
@@ -191,6 +223,11 @@ impl Default for Config {
             load_balancing_mode: default_load_balancing_mode(),
             extract_thinking: default_extract_thinking(),
             auto_continue_enabled: default_auto_continue_enabled(),
+            auto_continue_stop_reason_check_enabled:
+                default_auto_continue_stop_reason_check_enabled(),
+            auto_continue_done_tool_check_enabled: default_auto_continue_done_tool_check_enabled(),
+            auto_continue_max_attempts: default_auto_continue_max_attempts(),
+            auto_continue_prompt: default_auto_continue_prompt(),
             default_endpoint: default_endpoint(),
             endpoints: HashMap::new(),
             config_path: None,
@@ -245,7 +282,8 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("配置文件路径未知，无法保存配置"))?;
 
         let content = serde_json::to_string_pretty(self).context("序列化配置失败")?;
-        fs::write(path, content).with_context(|| format!("写入配置文件失败: {}", path.display()))?;
+        fs::write(path, content)
+            .with_context(|| format!("写入配置文件失败: {}", path.display()))?;
         Ok(())
     }
 }

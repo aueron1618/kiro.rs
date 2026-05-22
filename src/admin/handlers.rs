@@ -9,8 +9,8 @@ use axum::{
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetAutoContinueConfigRequest, SetDisabledRequest,
-        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
+        AddCredentialRequest, AutoContinueConfigUpdateRequest, SetAutoContinueConfigRequest,
+        SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -141,7 +141,6 @@ pub async fn set_load_balancing_mode(
     }
 }
 
-
 /// GET /api/admin/config/auto-continue
 /// 获取自动续写开关
 pub async fn get_auto_continue_config(State(state): State<AdminState>) -> impl IntoResponse {
@@ -159,4 +158,22 @@ pub async fn set_auto_continue_config(
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
+}
+
+/// PATCH /api/admin/config/auto-continue
+/// 更新自动续写完整配置（即时生效）
+pub async fn update_auto_continue_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<AutoContinueConfigUpdateRequest>,
+) -> impl IntoResponse {
+    match state.service.update_auto_continue_config(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/auto-continue/requests
+/// 获取自动续写请求记录
+pub async fn get_auto_continue_requests(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_auto_continue_requests())
 }

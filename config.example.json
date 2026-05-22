@@ -6,5 +6,9 @@
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
   "defaultEndpoint": "ide",
-  "autoContinueEnabled": true
+  "autoContinueEnabled": true,
+  "autoContinueStopReasonCheckEnabled": true,
+  "autoContinueDoneToolCheckEnabled": true,
+  "autoContinueMaxAttempts": 3,
+  "autoContinuePrompt": "Continue your last message without repeating its original content. When the answer is fully complete, call the auto_continue_done tool."
 }

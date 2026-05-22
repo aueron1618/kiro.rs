@@ -91,9 +91,35 @@ export interface AddCredentialResponse {
 // 自动续写开关响应
 export interface AutoContinueConfigResponse {
   enabled: boolean
+  stopReasonCheckEnabled: boolean
+  doneToolCheckEnabled: boolean
+  maxAttempts: number
+  prompt: string
 }
 
 // 自动续写开关设置请求
 export interface SetAutoContinueConfigRequest {
   enabled: boolean
+}
+
+// 自动续写完整配置更新请求
+export interface AutoContinueConfigUpdateRequest {
+  enabled?: boolean
+  stopReasonCheckEnabled?: boolean
+  doneToolCheckEnabled?: boolean
+  maxAttempts?: number
+  prompt?: string
+}
+
+// 自动续写请求记录
+export interface AutoContinueRequestRecord {
+  id: string
+  startedAt: string
+  inputTokens: number
+  outputTokens: number
+  durationMs: number
+  continuationCount: number
+  stopReasons: string[]
+  doneMarkerFound: boolean
+  hasToolUse: boolean
 }

@@ -8,9 +8,10 @@ use axum::{
 use super::{
     handlers::{
         add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_auto_continue_config, get_credential_balance, get_load_balancing_mode,
-        reset_failure_count, set_auto_continue_config, set_credential_disabled,
-        set_credential_priority, set_load_balancing_mode,
+        get_auto_continue_config, get_auto_continue_requests, get_credential_balance,
+        get_load_balancing_mode, reset_failure_count, set_auto_continue_config,
+        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        update_auto_continue_config,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -51,8 +52,11 @@ pub fn create_admin_router(state: AdminState) -> Router {
         )
         .route(
             "/config/auto-continue",
-            get(get_auto_continue_config).put(set_auto_continue_config),
+            get(get_auto_continue_config)
+                .put(set_auto_continue_config)
+                .patch(update_auto_continue_config),
         )
+        .route("/auto-continue/requests", get(get_auto_continue_requests))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

@@ -10,6 +10,8 @@ import type {
   AddCredentialResponse,
   AutoContinueConfigResponse,
   SetAutoContinueConfigRequest,
+  AutoContinueConfigUpdateRequest,
+  AutoContinueRequestRecord,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -116,5 +118,17 @@ export async function getAutoContinueConfig(): Promise<AutoContinueConfigRespons
 // 设置自动续写开关
 export async function setAutoContinueConfig(enabled: boolean): Promise<AutoContinueConfigResponse> {
   const { data } = await api.put<AutoContinueConfigResponse>('/config/auto-continue', { enabled } as SetAutoContinueConfigRequest)
+  return data
+}
+
+// 更新自动续写完整配置
+export async function updateAutoContinueConfig(req: AutoContinueConfigUpdateRequest): Promise<AutoContinueConfigResponse> {
+  const { data } = await api.patch<AutoContinueConfigResponse>('/config/auto-continue', req)
+  return data
+}
+
+// 获取自动续写请求记录
+export async function getAutoContinueRequests(): Promise<AutoContinueRequestRecord[]> {
+  const { data } = await api.get<AutoContinueRequestRecord[]>('/auto-continue/requests')
   return data
 }

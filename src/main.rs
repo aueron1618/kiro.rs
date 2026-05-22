@@ -40,7 +40,13 @@ async fn main() {
         std::process::exit(1);
     });
     let runtime_config = Arc::new(RwLock::new(config.clone()));
-    let runtime_flags = Arc::new(anthropic::RuntimeFlags::new(config.auto_continue_enabled));
+    let runtime_flags = Arc::new(anthropic::RuntimeFlags::new_with_auto_continue_config(
+        config.auto_continue_enabled,
+        config.auto_continue_stop_reason_check_enabled,
+        config.auto_continue_done_tool_check_enabled,
+        config.auto_continue_max_attempts,
+        config.auto_continue_prompt.clone(),
+    ));
 
     // 加载凭证（支持单对象或数组格式）
     let credentials_path = args
@@ -113,10 +119,7 @@ async fn main() {
 
     // 校验所有凭据声明的端点都已注册
     for cred in &credentials_list {
-        let name = cred
-            .endpoint
-            .as_deref()
-            .unwrap_or(&config.default_endpoint);
+        let name = cred.endpoint.as_deref().unwrap_or(&config.default_endpoint);
         if !endpoints.contains_key(name) {
             tracing::error!(
                 "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",

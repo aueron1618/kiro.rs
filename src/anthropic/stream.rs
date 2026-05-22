@@ -556,6 +556,8 @@ pub struct AutoContinueSegment {
     pub has_tool_use: bool,
     /// 当前分段是否检测到完成标记
     pub done_marker_found: bool,
+    /// 当前分段结束原因
+    pub stop_reason: String,
 }
 
 impl AutoContinueSegment {
@@ -660,6 +662,7 @@ impl StreamContext {
             visible_text: self.current_segment_visible_text.clone(),
             has_tool_use: self.current_segment_has_tool_use,
             done_marker_found: self.current_segment_done_marker_found,
+            stop_reason: self.state_manager.get_stop_reason(),
         }
     }
 
@@ -1112,6 +1115,11 @@ impl StreamContext {
         self.state_manager.set_stop_reason(reason);
     }
 
+    /// 获取最终输入 tokens（优先使用 contextUsageEvent 计算值）
+    pub fn final_input_tokens(&self) -> i32 {
+        self.context_input_tokens.unwrap_or(self.input_tokens)
+    }
+
     /// 生成最终事件序列
     pub fn generate_final_events(&mut self) -> Vec<SseEvent> {
         let mut events = Vec::new();
@@ -1190,7 +1198,7 @@ impl StreamContext {
         }
 
         // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-        let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
+        let final_input_tokens = self.final_input_tokens();
 
         // 生成最终事件
         events.extend(
@@ -1273,6 +1281,11 @@ impl BufferedStreamContext {
     /// 覆写最终 stop_reason。
     pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
         self.inner.set_stop_reason(reason);
+    }
+
+    /// 获取最终输入 tokens（优先使用 contextUsageEvent 计算值）
+    pub fn final_input_tokens(&self) -> i32 {
+        self.inner.final_input_tokens()
     }
 
     /// 完成流处理并返回所有事件

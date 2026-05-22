@@ -26,10 +26,10 @@ mod converter;
 mod handlers;
 mod middleware;
 mod router;
-mod runtime;
+pub(crate) mod runtime;
 mod stream;
 pub mod types;
 mod websearch;
 
-pub use runtime::RuntimeFlags;
 pub use router::create_router_with_provider;
+pub use runtime::RuntimeFlags;

@@ -13,7 +13,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useAutoContinueConfig, useSetAutoContinueConfig } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useAutoContinueConfig, useUpdateAutoContinueConfig, useAutoContinueRequests } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
@@ -48,6 +48,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
     return false
   })
+  const [activeTab, setActiveTab] = useState<'settings' | 'requests' | 'credentials'>('credentials')
+  const [requestsAutoRefresh, setRequestsAutoRefresh] = useState(true)
+  const [autoContinuePromptDraft, setAutoContinuePromptDraft] = useState('')
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
@@ -56,7 +59,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
   const { data: autoContinueData, isLoading: isLoadingAutoContinue } = useAutoContinueConfig()
-  const { mutate: setAutoContinueConfig, isPending: isSettingAutoContinue } = useSetAutoContinueConfig()
+  const { mutate: updateAutoContinueConfig, isPending: isUpdatingAutoContinue } = useUpdateAutoContinueConfig()
+  const { data: autoContinueRequests = [], isLoading: isLoadingAutoContinueRequests, refetch: refetchAutoContinueRequests, isFetching: isFetchingAutoContinueRequests } = useAutoContinueRequests(requestsAutoRefresh)
 
   // 计算分页
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
@@ -73,6 +77,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
   useEffect(() => {
     setCurrentPage(1)
   }, [data?.credentials.length])
+
+  useEffect(() => {
+    setAutoContinuePromptDraft(autoContinueData?.prompt ?? '')
+  }, [autoContinueData?.prompt])
 
   // 只保留当前仍存在的凭据缓存，避免删除后残留旧数据
   useEffect(() => {
@@ -510,16 +518,43 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
-  // 切换自动续写开关（后端运行时即时生效）
-  const handleToggleAutoContinue = (enabled: boolean) => {
-    setAutoContinueConfig(enabled, {
+  const handleUpdateAutoContinue = (updates: {
+    enabled?: boolean
+    stopReasonCheckEnabled?: boolean
+    doneToolCheckEnabled?: boolean
+    maxAttempts?: number
+    prompt?: string
+  }, successMessage = '自动续写配置已更新') => {
+    updateAutoContinueConfig(updates, {
       onSuccess: () => {
-        toast.success(enabled ? '已启用自动续写' : '已关闭自动续写')
+        toast.success(successMessage)
       },
       onError: (error) => {
-        toast.error(`切换自动续写失败: ${extractErrorMessage(error)}`)
+        toast.error(`更新自动续写配置失败: ${extractErrorMessage(error)}`)
       }
     })
+  }
+
+  const formatRecordTime = (startedAt: string) => {
+    const millis = Number(startedAt)
+    if (!Number.isFinite(millis) || millis <= 0) return startedAt || '-'
+    return new Date(millis).toLocaleString()
+  }
+
+  const formatStopReasons = (reasons: string[]) => {
+    if (!reasons.length) return '-'
+    return reasons.join(' → ')
+  }
+
+  const promptDirty = autoContinuePromptDraft !== (autoContinueData?.prompt ?? '')
+  const promptInvalid = autoContinuePromptDraft.trim().length === 0
+
+  const handleSaveAutoContinuePrompt = () => {
+    if (promptInvalid) {
+      toast.error('续写提示词不能为空')
+      return
+    }
+    handleUpdateAutoContinue({ prompt: autoContinuePromptDraft }, '续写提示词已保存')
   }
 
 
@@ -561,15 +596,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
             <span className="font-semibold">Kiro Admin</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 rounded-md border px-3 py-1.5" title="控制后端自动续写功能，切换后即时生效">
-              <span className="text-sm text-muted-foreground whitespace-nowrap">自动续写</span>
-              <Switch
-                checked={autoContinueData?.enabled ?? true}
-                disabled={isLoadingAutoContinue || isSettingAutoContinue}
-                onCheckedChange={handleToggleAutoContinue}
-                aria-label="自动续写开关"
-              />
-            </div>
             <Button
               variant="outline"
               size="sm"
@@ -590,10 +616,118 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </Button>
           </div>
         </div>
+        <div className="container flex h-11 items-center gap-2 px-4 md:px-8 border-t">
+          <Button
+            variant={activeTab === 'credentials' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('credentials')}
+          >凭证管理</Button>
+          <Button
+            variant={activeTab === 'requests' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('requests')}
+          >请求</Button>
+          <Button
+            variant={activeTab === 'settings' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('settings')}
+          >设置</Button>
+        </div>
       </header>
 
       {/* 主内容 */}
       <main className="container mx-auto px-4 md:px-8 py-6">
+        {activeTab === 'settings' ? (
+        <>
+        <div className="grid gap-4 md:grid-cols-2 mb-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">自动续写设置</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div>
+                  <div className="font-medium">续写开关</div>
+                  <div className="text-sm text-muted-foreground">控制后端自动续写功能，切换后即时生效</div>
+                </div>
+                <Switch
+                  checked={autoContinueData?.enabled ?? true}
+                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue}
+                  onCheckedChange={(enabled) => handleUpdateAutoContinue({ enabled })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div>
+                  <div className="font-medium">stop_reason 判断</div>
+                  <div className="text-sm text-muted-foreground">优先判断 max_tokens / end_turn，只有 max_tokens 才允许续写</div>
+                </div>
+                <Switch
+                  checked={autoContinueData?.stopReasonCheckEnabled ?? true}
+                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue || !(autoContinueData?.enabled ?? true)}
+                  onCheckedChange={(stopReasonCheckEnabled) => handleUpdateAutoContinue({ stopReasonCheckEnabled })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div>
+                  <div className="font-medium">结束工具判断</div>
+                  <div className="text-sm text-muted-foreground">当 stop_reason 为 max_tokens 时，再用 auto_continue_done 作为二级结束信号</div>
+                </div>
+                <Switch
+                  checked={autoContinueData?.doneToolCheckEnabled ?? true}
+                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue || !(autoContinueData?.enabled ?? true)}
+                  onCheckedChange={(doneToolCheckEnabled) => handleUpdateAutoContinue({ doneToolCheckEnabled })}
+                />
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">续写参数</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">续写次数</label>
+                <input
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={autoContinueData?.maxAttempts ?? 3}
+                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue}
+                  onChange={(e) => handleUpdateAutoContinue({ maxAttempts: Number(e.target.value) })}
+                />
+              </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-sm font-medium">续写提示词</label>
+                  <div className="flex items-center gap-2">
+                    {promptDirty && <span className="text-xs text-muted-foreground">未保存</span>}
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleSaveAutoContinuePrompt}
+                      disabled={isLoadingAutoContinue || isUpdatingAutoContinue || !promptDirty || promptInvalid}
+                    >
+                      保存
+                    </Button>
+                  </div>
+                </div>
+                <textarea
+                  className="min-h-28 w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  value={autoContinuePromptDraft}
+                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue}
+                  onChange={(e) => setAutoContinuePromptDraft(e.target.value)}
+                />
+                {promptInvalid && (
+                  <p className="text-xs text-destructive">续写提示词不能为空</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+        </>
+        ) : activeTab === 'credentials' ? (
+        <>
         {/* 统计卡片 */}
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <Card>
@@ -770,6 +904,75 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </>
           )}
         </div>
+        </>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-xl font-semibold">请求记录</h2>
+              <div className="flex items-center gap-3">
+                <Badge variant="secondary">{autoContinueRequests.length} 条</Badge>
+                <div
+                  className="flex items-center gap-2 rounded-md border px-3 py-1.5"
+                  title="开启后每 5 秒自动刷新请求记录"
+                >
+                  <span className="text-sm text-muted-foreground whitespace-nowrap">自动刷新</span>
+                  <Switch
+                    checked={requestsAutoRefresh}
+                    onCheckedChange={setRequestsAutoRefresh}
+                    aria-label="请求记录自动刷新开关"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => refetchAutoContinueRequests()}
+                  disabled={isFetchingAutoContinueRequests}
+                >
+                  <RefreshCw className={`h-4 w-4 mr-2 ${isFetchingAutoContinueRequests ? 'animate-spin' : ''}`} />
+                  手动刷新
+                </Button>
+              </div>
+            </div>
+            <Card>
+              <CardContent className="p-0 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b bg-muted/40">
+                    <tr>
+                      <th className="px-4 py-3 text-left font-medium">时间</th>
+                      <th className="px-4 py-3 text-left font-medium">输入 Token</th>
+                      <th className="px-4 py-3 text-left font-medium">输出 Token</th>
+                      <th className="px-4 py-3 text-left font-medium">耗时</th>
+                      <th className="px-4 py-3 text-left font-medium">续写次数</th>
+                      <th className="px-4 py-3 text-left font-medium">所有结束信号</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {isLoadingAutoContinueRequests ? (
+                      <tr><td className="px-4 py-6 text-center text-muted-foreground" colSpan={6}>加载中...</td></tr>
+                    ) : autoContinueRequests.length === 0 ? (
+                      <tr><td className="px-4 py-6 text-center text-muted-foreground" colSpan={6}>暂无请求记录</td></tr>
+                    ) : autoContinueRequests.map((record) => (
+                      <tr key={record.id} className="border-b last:border-0">
+                        <td className="px-4 py-3 whitespace-nowrap">{formatRecordTime(record.startedAt)}</td>
+                        <td className="px-4 py-3">{record.inputTokens}</td>
+                        <td className="px-4 py-3">{record.outputTokens}</td>
+                        <td className="px-4 py-3">{record.durationMs} ms</td>
+                        <td className="px-4 py-3">{record.continuationCount}</td>
+                        <td className="px-4 py-3 min-w-64">
+                          <div>{formatStopReasons(record.stopReasons)}</div>
+                          <div className="mt-1 flex gap-2 text-xs text-muted-foreground">
+                            <span>结束工具: {record.doneMarkerFound ? '是' : '否'}</span>
+                            <span>工具调用: {record.hasToolUse ? '是' : '否'}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </main>
 
       {/* 余额对话框 */}

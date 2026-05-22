@@ -1,5 +1,6 @@
 //! Admin API 类型定义
 
+use crate::anthropic;
 use serde::{Deserialize, Serialize};
 
 // ============ 凭据状态 ============
@@ -204,6 +205,26 @@ pub struct SetLoadBalancingModeRequest {
 pub struct AutoContinueConfigResponse {
     /// 是否启用自动续写
     pub enabled: bool,
+    /// 是否启用 stop_reason 判定
+    pub stop_reason_check_enabled: bool,
+    /// 是否启用结束工具判定
+    pub done_tool_check_enabled: bool,
+    /// 最大续写次数
+    pub max_attempts: usize,
+    /// 续写提示词
+    pub prompt: String,
+}
+
+impl From<anthropic::runtime::AutoContinueConfigSnapshot> for AutoContinueConfigResponse {
+    fn from(snapshot: anthropic::runtime::AutoContinueConfigSnapshot) -> Self {
+        Self {
+            enabled: snapshot.enabled,
+            stop_reason_check_enabled: snapshot.stop_reason_check_enabled,
+            done_tool_check_enabled: snapshot.done_tool_check_enabled,
+            max_attempts: snapshot.max_attempts,
+            prompt: snapshot.prompt,
+        }
+    }
 }
 
 /// 设置自动续写开关请求
@@ -212,6 +233,48 @@ pub struct AutoContinueConfigResponse {
 pub struct SetAutoContinueConfigRequest {
     /// 是否启用自动续写
     pub enabled: bool,
+}
+
+/// 自动续写配置更新请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoContinueConfigUpdateRequest {
+    pub enabled: Option<bool>,
+    pub stop_reason_check_enabled: Option<bool>,
+    pub done_tool_check_enabled: Option<bool>,
+    pub max_attempts: Option<usize>,
+    pub prompt: Option<String>,
+}
+
+/// 自动续写请求记录响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoContinueRequestRecordResponse {
+    pub id: String,
+    pub started_at: String,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub duration_ms: u128,
+    pub continuation_count: usize,
+    pub stop_reasons: Vec<String>,
+    pub done_marker_found: bool,
+    pub has_tool_use: bool,
+}
+
+impl From<anthropic::runtime::AutoContinueRequestRecord> for AutoContinueRequestRecordResponse {
+    fn from(record: anthropic::runtime::AutoContinueRequestRecord) -> Self {
+        Self {
+            id: record.id,
+            started_at: record.started_at,
+            input_tokens: record.input_tokens,
+            output_tokens: record.output_tokens,
+            duration_ms: record.duration_ms,
+            continuation_count: record.continuation_count,
+            stop_reasons: record.stop_reasons,
+            done_marker_found: record.done_marker_found,
+            has_tool_use: record.has_tool_use,
+        }
+    }
 }
 
 // ============ 通用响应 ============
