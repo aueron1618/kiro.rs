@@ -177,6 +177,49 @@ pub struct BalanceResponse {
     pub usage_percentage: f64,
     /// 下次重置时间（Unix 时间戳）
     pub next_reset_at: Option<f64>,
+    /// 用户当前是否开启了超额
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overage_enabled: Option<bool>,
+    /// 账号订阅是否可以开启超额
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overage_capable: Option<bool>,
+    /// 上游 `overageCapability` 原始字符串（用于排查“未知”状态）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overage_capability_raw: Option<String>,
+}
+
+// ============ 一键超额 ============
+
+/// 一键超额禁用结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaExceededResult {
+    /// 已被禁用的凭据 ID 列表
+    pub disabled_ids: Vec<u64>,
+    /// 跳过的凭据 ID 列表（如禁用失败等）
+    pub skipped_ids: Vec<u64>,
+}
+
+/// 设置单个凭据的超额开关
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetOverageRequest {
+    /// true 开启超额；false 关闭
+    pub enabled: bool,
+}
+
+/// 一键开启超额结果
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnableOverageAllResult {
+    /// 成功开启的凭据 ID 列表
+    pub enabled_ids: Vec<u64>,
+    /// 跳过（不可开启 / 已开启 / 已禁用）
+    pub skipped_ids: Vec<u64>,
+    /// 调用失败的凭据 ID 列表
+    pub failed_ids: Vec<u64>,
+    /// 失败原因（与 failed_ids 一一对应）
+    pub failure_messages: Vec<String>,
 }
 
 // ============ 负载均衡配置 ============

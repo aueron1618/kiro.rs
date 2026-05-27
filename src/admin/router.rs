@@ -7,10 +7,11 @@ use axum::{
 
 use super::{
     handlers::{
-        add_credential, delete_credential, force_refresh_token, get_all_credentials,
-        get_auto_continue_config, get_auto_continue_requests, get_credential_balance,
-        get_load_balancing_mode, reset_failure_count, set_auto_continue_config,
-        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        add_credential, delete_credential, disable_quota_exceeded, enable_overage_all,
+        force_refresh_token, get_all_credentials, get_auto_continue_config,
+        get_auto_continue_requests, get_credential_balance, get_load_balancing_mode,
+        reset_failure_count, set_auto_continue_config, set_credential_disabled,
+        set_credential_overage, set_credential_priority, set_load_balancing_mode,
         update_auto_continue_config,
     },
     middleware::{AdminState, admin_auth_middleware},
@@ -27,6 +28,9 @@ use super::{
 /// - `POST /credentials/:id/reset` - 重置失败计数
 /// - `POST /credentials/:id/refresh` - 强制刷新 Token
 /// - `GET /credentials/:id/balance` - 获取凭据余额
+/// - `POST /credentials/disable-quota-exceeded` - 禁用已超额凭据
+/// - `POST /credentials/overage/enable-all` - 一键开启超额
+/// - `POST /credentials/:id/overage` - 设置凭据超额开关
 /// - `GET /config/load-balancing` - 获取负载均衡模式
 /// - `PUT /config/load-balancing` - 设置负载均衡模式
 ///
@@ -44,8 +48,14 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/credentials/{id}/disabled", post(set_credential_disabled))
         .route("/credentials/{id}/priority", post(set_credential_priority))
         .route("/credentials/{id}/reset", post(reset_failure_count))
+        .route(
+            "/credentials/disable-quota-exceeded",
+            post(disable_quota_exceeded),
+        )
+        .route("/credentials/overage/enable-all", post(enable_overage_all))
         .route("/credentials/{id}/refresh", post(force_refresh_token))
         .route("/credentials/{id}/balance", get(get_credential_balance))
+        .route("/credentials/{id}/overage", post(set_credential_overage))
         .route(
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),

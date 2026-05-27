@@ -38,6 +38,12 @@ export interface BalanceResponse {
   remaining: number
   usagePercentage: number
   nextResetAt: number | null
+  /** 用户是否当前开启了超额 */
+  overageEnabled?: boolean
+  /** 账号订阅是否可以开启超额 */
+  overageCapable?: boolean
+  /** 上游 overageCapability 原始字符串，用于排查“未知”状态 */
+  overageCapabilityRaw?: string
 }
 
 // 成功响应
@@ -86,6 +92,20 @@ export interface AddCredentialResponse {
   message: string
   credentialId: number
   email?: string
+}
+
+// 一键禁用所有“已超额”凭据结果
+export interface QuotaExceededResult {
+  disabledIds: number[]
+  skippedIds: number[]
+}
+
+// 一键开启超额结果
+export interface EnableOverageAllResult {
+  enabledIds: number[]
+  skippedIds: number[]
+  failedIds: number[]
+  failureMessages: string[]
 }
 
 // 自动续写开关响应

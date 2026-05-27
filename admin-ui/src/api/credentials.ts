@@ -12,6 +12,8 @@ import type {
   SetAutoContinueConfigRequest,
   AutoContinueConfigUpdateRequest,
   AutoContinueRequestRecord,
+  QuotaExceededResult,
+  EnableOverageAllResult,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -94,6 +96,24 @@ export async function addCredential(
 // 删除凭据
 export async function deleteCredential(id: number): Promise<SuccessResponse> {
   const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
+  return data
+}
+
+// 一键禁用所有“已超额”凭据
+export async function disableQuotaExceeded(): Promise<QuotaExceededResult> {
+  const { data } = await api.post<QuotaExceededResult>('/credentials/disable-quota-exceeded')
+  return data
+}
+
+// 设置单个凭据的超额开关
+export async function setCredentialOverage(id: number, enabled: boolean): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/overage`, { enabled })
+  return data
+}
+
+// 一键开启所有可开启超额的凭据
+export async function enableOverageForAllCapable(): Promise<EnableOverageAllResult> {
+  const { data } = await api.post<EnableOverageAllResult>('/credentials/overage/enable-all')
   return data
 }
 

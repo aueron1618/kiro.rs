@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2 } from 'lucide-react'
+import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2, Zap, ZapOff } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +16,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import { getCredentialBalance, setCredentialOverage } from '@/api/credentials'
+import { extractErrorMessage } from '@/lib/utils'
 import {
   useSetDisabled,
   useSetPriority,
@@ -31,6 +33,7 @@ interface CredentialCardProps {
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  onBalanceUpdated?: (id: number, balance: BalanceResponse) => void
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -49,6 +52,43 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
+function OverageStatusPill({ balance }: { balance: BalanceResponse }) {
+  if (balance.overageCapable === false) return null
+
+  if (balance.overageEnabled === true) {
+    return (
+      <Badge variant="success" className="inline-flex items-center gap-1">
+        <Zap className="h-3 w-3" />超额已开
+      </Badge>
+    )
+  }
+
+  if (balance.overageCapable === true) {
+    return (
+      <Badge
+        variant="warning"
+        className="inline-flex items-center gap-1"
+        title="此账号支持超额但当前未开启"
+      >
+        <ZapOff className="h-3 w-3" />超额未开
+      </Badge>
+    )
+  }
+
+  return (
+    <Badge
+      variant="outline"
+      title={
+        balance.overageCapabilityRaw
+          ? `overageCapability = ${balance.overageCapabilityRaw}`
+          : '上游未返回 overageCapability'
+      }
+    >
+      超额未知
+    </Badge>
+  )
+}
+
 export function CredentialCard({
   credential,
   onViewBalance,
@@ -56,6 +96,7 @@ export function CredentialCard({
   onToggleSelect,
   balance,
   loadingBalance,
+  onBalanceUpdated,
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
@@ -66,6 +107,7 @@ export function CredentialCard({
   const resetFailure = useResetFailure()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
+  const [overageBusy, setOverageBusy] = useState(false)
 
   const handleToggleDisabled = () => {
     setDisabled.mutate(
@@ -123,6 +165,25 @@ export function CredentialCard({
     })
   }
 
+  const handleSetOverage = async (enabled: boolean) => {
+    setOverageBusy(true)
+    try {
+      await setCredentialOverage(credential.id, enabled)
+      toast.success(enabled ? '已开启超额' : '已关闭超额')
+
+      try {
+        const latestBalance = await getCredentialBalance(credential.id)
+        onBalanceUpdated?.(credential.id, latestBalance)
+      } catch (error) {
+        toast.warning('超额状态已变更，但刷新余额失败: ' + extractErrorMessage(error))
+      }
+    } catch (error) {
+      toast.error((enabled ? '开启' : '关闭') + '超额失败: ' + extractErrorMessage(error))
+    } finally {
+      setOverageBusy(false)
+    }
+  }
+
   const handleDelete = () => {
     if (!credential.disabled) {
       toast.error('请先禁用凭据再删除')
@@ -141,9 +202,14 @@ export function CredentialCard({
     })
   }
 
+  const isQuotaExceeded = balance
+    ? balance.remaining <= 0 || balance.usagePercentage >= 100
+    : false
+  const disabledByQuota = credential.disabled && credential.disabledReason === 'QuotaExceeded'
+
   return (
     <>
-      <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
+      <Card className={`${credential.isCurrent ? 'ring-2 ring-primary' : ''} ${!credential.disabled && isQuotaExceeded ? 'ring-1 ring-yellow-500/70' : ''} ${disabledByQuota ? 'ring-1 ring-yellow-500/80 bg-yellow-50/40 dark:bg-yellow-500/[0.04]' : ''}`}>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -160,7 +226,12 @@ export function CredentialCard({
                   <Badge variant="destructive">已禁用</Badge>
                 )}
                 {credential.disabled && credential.disabledReason && (
-                  <Badge variant="outline">{credential.disabledReason}</Badge>
+                  <Badge variant={credential.disabledReason === 'QuotaExceeded' ? 'warning' : 'outline'}>
+                    {credential.disabledReason === 'QuotaExceeded' ? '已超额' : credential.disabledReason}
+                  </Badge>
+                )}
+                {!credential.disabled && isQuotaExceeded && (
+                  <Badge variant="warning">已超额</Badge>
                 )}
                 {credential.authMethod && (
                   <Badge variant="secondary">
@@ -272,15 +343,23 @@ export function CredentialCard({
                 </span>
               ) : balance ? (
                 <span className="font-medium ml-1">
-                  {balance.remaining.toFixed(2)} / {balance.usageLimit.toFixed(2)}
+                  <span className={balance.remaining < 0 ? 'text-red-500' : ''}>
+                    {balance.remaining.toFixed(2)}
+                  </span> / {balance.usageLimit.toFixed(2)}
                   <span className="text-xs text-muted-foreground ml-1">
-                    ({(100 - balance.usagePercentage).toFixed(1)}% 剩余)
+                    ({balance.usagePercentage.toFixed(1)}% 已用)
                   </span>
                 </span>
               ) : (
                 <span className="text-sm text-muted-foreground ml-1">未知</span>
               )}
             </div>
+            {balance && (
+              <div className="col-span-2 flex items-center gap-2">
+                <span className="text-muted-foreground">超额状态：</span>
+                <OverageStatusPill balance={balance} />
+              </div>
+            )}
             {credential.hasProxy && (
               <div className="col-span-2">
                 <span className="text-muted-foreground">代理：</span>
@@ -359,6 +438,29 @@ export function CredentialCard({
               <Wallet className="h-4 w-4 mr-1" />
               查看余额
             </Button>
+            {balance?.overageCapable === true && (
+              balance.overageEnabled ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleSetOverage(false)}
+                  disabled={overageBusy || credential.disabled}
+                >
+                  <ZapOff className="h-4 w-4 mr-1" />
+                  关闭超额
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleSetOverage(true)}
+                  disabled={overageBusy || credential.disabled}
+                >
+                  <Zap className="h-4 w-4 mr-1" />
+                  开启超额
+                </Button>
+              )
+            )}
             <Button
               size="sm"
               variant="destructive"

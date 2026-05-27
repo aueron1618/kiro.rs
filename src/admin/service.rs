@@ -15,8 +15,9 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, AutoContinueConfigResponse,
     AutoContinueConfigUpdateRequest, AutoContinueRequestRecordResponse, BalanceResponse,
-    CredentialStatusItem, CredentialsStatusResponse, LoadBalancingModeResponse,
-    SetAutoContinueConfigRequest, SetLoadBalancingModeRequest,
+    CredentialStatusItem, CredentialsStatusResponse, EnableOverageAllResult,
+    LoadBalancingModeResponse, QuotaExceededResult, SetAutoContinueConfigRequest,
+    SetLoadBalancingModeRequest,
 };
 use crate::{anthropic::RuntimeFlags, model::config::Config};
 
@@ -111,6 +112,60 @@ impl AdminService {
         }
     }
 
+    /// 一键禁用所有“已超额”的凭据（remaining ≤ 0 或 usage_percentage ≥ 100）
+    ///
+    /// 数据来源是 `balance_cache`，前端在调用前最好先触发一次“查询信息”。
+    pub fn disable_quota_exceeded(&self) -> QuotaExceededResult {
+        let snapshot = self.token_manager.snapshot();
+        let current_id = snapshot.current_id;
+
+        let cache_snapshot: HashMap<u64, CachedBalance> = {
+            let cache = self.balance_cache.lock();
+            cache.clone()
+        };
+        let now_ts = Utc::now().timestamp() as f64;
+
+        let mut disabled_ids: Vec<u64> = Vec::new();
+        let mut skipped_ids: Vec<u64> = Vec::new();
+        let mut switched_current = false;
+
+        for entry in snapshot.entries.iter() {
+            if entry.disabled {
+                continue;
+            }
+            let cached = match cache_snapshot.get(&entry.id) {
+                Some(c) if (now_ts - c.cached_at) < BALANCE_CACHE_TTL_SECS as f64 => c,
+                _ => continue,
+            };
+            let exceeded = cached.data.remaining <= 0.0 || cached.data.usage_percentage >= 100.0;
+            if !exceeded {
+                continue;
+            }
+
+            match self.token_manager.disable_quota_exceeded(entry.id) {
+                Ok(()) => {
+                    disabled_ids.push(entry.id);
+                    if entry.id == current_id {
+                        switched_current = true;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("一键超额：禁用凭据 #{} 失败: {}", entry.id, e);
+                    skipped_ids.push(entry.id);
+                }
+            }
+        }
+
+        if switched_current {
+            let _ = self.token_manager.switch_to_next();
+        }
+
+        QuotaExceededResult {
+            disabled_ids,
+            skipped_ids,
+        }
+    }
+
     /// 设置凭据禁用状态
     pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminServiceError> {
         // 先获取当前凭据 ID，用于判断是否需要切换
@@ -185,9 +240,11 @@ impl AdminService {
 
         let current_usage = usage.current_usage();
         let usage_limit = usage.usage_limit();
-        let remaining = (usage_limit - current_usage).max(0.0);
+        // 保留真实差值：开启超额后 remaining 可能为负，便于 UI 展示“已超额”。
+        let remaining = usage_limit - current_usage;
+        // usage_percentage 同理保留真实值，超额时可大于 100%。
         let usage_percentage = if usage_limit > 0.0 {
-            (current_usage / usage_limit * 100.0).min(100.0)
+            current_usage / usage_limit * 100.0
         } else {
             0.0
         };
@@ -200,6 +257,12 @@ impl AdminService {
             remaining,
             usage_percentage,
             next_reset_at: usage.next_date_reset,
+            overage_enabled: usage.overage_enabled(),
+            overage_capable: usage.overage_capable(),
+            overage_capability_raw: usage
+                .subscription_info
+                .as_ref()
+                .and_then(|s| s.overage_capability.clone()),
         })
     }
 
@@ -421,6 +484,90 @@ impl AdminService {
             .into_iter()
             .map(AutoContinueRequestRecordResponse::from)
             .collect()
+    }
+
+    /// 一键开启所有“可开启超额且当前未开启”凭据的超额。
+    ///
+    /// 数据来源优先使用 balance_cache（5 分钟有效）；若缓存缺失或 capable 状态未知则乐观尝试，
+    /// 由上游 setUserPreference 接口本身决定是否成功。
+    pub async fn enable_overage_for_all_capable(&self) -> EnableOverageAllResult {
+        let snapshot = self.token_manager.snapshot();
+        let cache_snapshot: HashMap<u64, CachedBalance> = {
+            let cache = self.balance_cache.lock();
+            cache.clone()
+        };
+        let now_ts = Utc::now().timestamp() as f64;
+
+        let mut targets: Vec<u64> = Vec::new();
+        let mut skipped: Vec<u64> = Vec::new();
+        for entry in snapshot.entries.iter() {
+            if entry.disabled {
+                skipped.push(entry.id);
+                continue;
+            }
+            let cached = cache_snapshot
+                .get(&entry.id)
+                .filter(|c| (now_ts - c.cached_at) < BALANCE_CACHE_TTL_SECS as f64);
+
+            match cached {
+                Some(c) if c.data.overage_capable == Some(false) => skipped.push(entry.id),
+                Some(c) if c.data.overage_enabled == Some(true) => skipped.push(entry.id),
+                _ => targets.push(entry.id),
+            }
+        }
+
+        let mut enabled_ids: Vec<u64> = Vec::new();
+        let mut failed_ids: Vec<u64> = Vec::new();
+        let mut failure_messages: Vec<String> = Vec::new();
+
+        for id in targets {
+            match self
+                .token_manager
+                .set_user_preference_for(id, "ENABLED")
+                .await
+            {
+                Ok(()) => {
+                    enabled_ids.push(id);
+                    let mut cache = self.balance_cache.lock();
+                    cache.remove(&id);
+                }
+                Err(e) => {
+                    tracing::warn!("一键开启超额：凭据 #{} 失败: {}", id, e);
+                    failed_ids.push(id);
+                    failure_messages.push(e.to_string());
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+
+        if !enabled_ids.is_empty() {
+            self.save_balance_cache();
+        }
+
+        EnableOverageAllResult {
+            enabled_ids,
+            skipped_ids: skipped,
+            failed_ids,
+            failure_messages,
+        }
+    }
+
+    /// 设置凭据的“超额”开关（ENABLED / DISABLED）
+    /// 成功后会主动失效本地余额缓存，让下次列表刷新展示最新 overage 状态。
+    pub async fn set_overage(&self, id: u64, enabled: bool) -> Result<(), AdminServiceError> {
+        let status = if enabled { "ENABLED" } else { "DISABLED" };
+        self.token_manager
+            .set_user_preference_for(id, status)
+            .await
+            .map_err(|e| self.classify_balance_error(e, id))?;
+
+        {
+            let mut cache = self.balance_cache.lock();
+            cache.remove(&id);
+        }
+        self.save_balance_cache();
+
+        Ok(())
     }
 
     /// 强制刷新指定凭据的 Token

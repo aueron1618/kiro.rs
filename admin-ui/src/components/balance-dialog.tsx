@@ -84,9 +84,11 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
             {/* 详细信息 */}
             <div className="grid grid-cols-2 gap-4 pt-4 border-t text-sm">
               <div>
-                <span className="text-muted-foreground">剩余额度：</span>
-                <span className="font-medium text-green-600">
-                  ${formatNumber(balance.remaining)}
+                <span className="text-muted-foreground">
+                  {balance.remaining < 0 ? '已超额：' : '剩余额度：'}
+                </span>
+                <span className={`font-medium ${balance.remaining < 0 ? 'text-red-600' : 'text-green-600'}`}>
+                  {balance.remaining < 0 ? '-' : ''}${formatNumber(Math.abs(balance.remaining))}
                 </span>
               </div>
               <div>
@@ -94,6 +96,23 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
                 <span className="font-medium">
                   {formatDate(balance.nextResetAt)}
                 </span>
+              </div>
+              <div className="col-span-2">
+                <span className="text-muted-foreground">超额状态：</span>
+                <span className="font-medium">
+                  {balance.overageCapable === false
+                    ? '不支持'
+                    : balance.overageEnabled === true
+                      ? '已开启'
+                      : balance.overageCapable === true
+                        ? '未开启'
+                        : '未知'}
+                </span>
+                {balance.overageCapabilityRaw && (
+                  <span className="text-xs text-muted-foreground ml-2">
+                    ({balance.overageCapabilityRaw})
+                  </span>
+                )}
               </div>
             </div>
           </div>

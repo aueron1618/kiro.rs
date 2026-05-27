@@ -70,6 +70,40 @@ pub async fn reset_failure_count(
     }
 }
 
+/// POST /api/admin/credentials/disable-quota-exceeded
+/// 一键禁用所有缓存中已超额的凭据
+pub async fn disable_quota_exceeded(State(state): State<AdminState>) -> impl IntoResponse {
+    let result = state.service.disable_quota_exceeded();
+    Json(result)
+}
+
+/// POST /api/admin/credentials/:id/overage
+/// 设置指定凭据的超额开关
+pub async fn set_credential_overage(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<super::types::SetOverageRequest>,
+) -> impl IntoResponse {
+    match state.service.set_overage(id, payload.enabled).await {
+        Ok(_) => {
+            let action = if payload.enabled { "开启" } else { "关闭" };
+            Json(SuccessResponse::new(format!(
+                "凭据 #{} 已{}超额",
+                id, action
+            )))
+            .into_response()
+        }
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/overage/enable-all
+/// 一键开启所有可开启超额的凭据
+pub async fn enable_overage_all(State(state): State<AdminState>) -> impl IntoResponse {
+    let result = state.service.enable_overage_for_all_capable().await;
+    Json(result)
+}
+
 /// GET /api/admin/credentials/:id/balance
 /// 获取指定凭据的余额
 pub async fn get_credential_balance(

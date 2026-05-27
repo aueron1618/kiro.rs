@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, Zap, AlertTriangle } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -14,7 +14,7 @@ import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
 import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useAutoContinueConfig, useUpdateAutoContinueConfig, useAutoContinueRequests } from '@/hooks/use-credentials'
-import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
+import { getCredentialBalance, forceRefreshToken, disableQuotaExceeded, enableOverageForAllCapable } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
 import type { BalanceResponse } from '@/types/api'
 
@@ -68,6 +68,31 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const endIndex = startIndex + itemsPerPage
   const currentCredentials = data?.credentials.slice(startIndex, endIndex) || []
   const disabledCredentialCount = data?.credentials.filter(credential => credential.disabled).length || 0
+  const quotaExceededCount = (data?.credentials || []).filter(credential => {
+    if (credential.disabled) return false
+    const balance = balanceMap.get(credential.id)
+    return Boolean(balance && (balance.remaining <= 0 || balance.usagePercentage >= 100))
+  }).length
+  const overageStats = (() => {
+    let enabled = 0
+    let disabledOff = 0
+    let unknown = 0
+    for (const credential of data?.credentials || []) {
+      if (credential.disabled) continue
+      const balance = balanceMap.get(credential.id)
+      if (!balance) {
+        unknown++
+        continue
+      }
+      if (balance.overageCapable === false) continue
+      if (balance.overageEnabled === true) enabled++
+      else if (balance.overageCapable === true) disabledOff++
+      else unknown++
+    }
+    return { enabled, disabledOff, unknown }
+  })()
+  const overageEnableableCount = overageStats.disabledOff
+  const overageRetryableCount = overageStats.disabledOff + overageStats.unknown
   const selectedDisabledCount = Array.from(selectedIds).filter(id => {
     const credential = data?.credentials.find(c => c.id === id)
     return Boolean(credential?.disabled)
@@ -124,6 +149,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const handleViewBalance = (id: number) => {
     setSelectedCredentialId(id)
     setBalanceDialogOpen(true)
+  }
+
+  const handleBalanceUpdated = (id: number, balance: BalanceResponse) => {
+    setBalanceMap(prev => {
+      const next = new Map(prev)
+      next.set(id, balance)
+      return next
+    })
   }
 
   const handleRefresh = () => {
@@ -349,6 +382,57 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
 
     deselectAll()
+  }
+
+  // 一键超额：把所有已超额（未禁用）凭据标记为 QuotaExceeded 并禁用
+  const [disablingQuota, setDisablingQuota] = useState(false)
+  const handleDisableQuotaExceeded = async () => {
+    if (quotaExceededCount === 0) {
+      toast.info('当前没有已超额的凭据，可先点击“查询信息”刷新余额')
+      return
+    }
+    if (!confirm(`确定要把 ${quotaExceededCount} 个已超额的凭据全部禁用吗？`)) return
+    setDisablingQuota(true)
+    try {
+      const result = await disableQuotaExceeded()
+      const ok = result.disabledIds.length
+      const skip = result.skippedIds.length
+      if (ok > 0) toast.success(`已禁用 ${ok} 个已超额凭据${skip > 0 ? `，跳过 ${skip} 个` : ''}`)
+      else toast.warning('未找到已超额凭据（缓存可能已失效）')
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    } catch (error) {
+      toast.error('一键超额禁用失败: ' + extractErrorMessage(error))
+    } finally {
+      setDisablingQuota(false)
+    }
+  }
+
+  // 一键开启超额：调用上游 setUserPreference 把所有“可开启且未开启”的凭据开启
+  const [enablingOverage, setEnablingOverage] = useState(false)
+  const handleEnableOverageAll = async () => {
+    if (overageRetryableCount === 0) {
+      toast.info('没有需要开启超额的凭据，可先点击“查询信息”刷新状态')
+      return
+    }
+    const msg = overageEnableableCount > 0
+      ? `确定要为 ${overageEnableableCount} 个凭据开启超额吗？开启后超出额度可能产生额外费用。`
+      : `当前没有明确“未开”的凭据，将对 ${overageStats.unknown} 个状态待定的凭据尝试开启超额。继续？`
+    if (!confirm(msg)) return
+    setEnablingOverage(true)
+    try {
+      const result = await enableOverageForAllCapable()
+      const ok = result.enabledIds.length
+      const fail = result.failedIds.length
+      if (ok > 0 && fail === 0) toast.success(`已为 ${ok} 个凭据开启超额`)
+      else if (ok > 0) toast.warning(`开启超额：成功 ${ok} 个，失败 ${fail} 个`)
+      else toast.warning(`没有成功开启超额，失败 ${fail} 个，跳过 ${result.skippedIds.length} 个`)
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      setBalanceMap(new Map())
+    } catch (error) {
+      toast.error('一键开启超额失败: ' + extractErrorMessage(error))
+    } finally {
+      setEnablingOverage(false)
+    }
   }
 
   // 查询当前页凭据信息（逐个查询，避免瞬时并发）
@@ -830,6 +914,33 @@ export function Dashboard({ onLogout }: DashboardProps) {
               )}
               {data?.credentials && data.credentials.length > 0 && (
                 <Button
+                  onClick={handleEnableOverageAll}
+                  size="sm"
+                  variant="outline"
+                  disabled={enablingOverage || overageRetryableCount === 0}
+                  title={overageRetryableCount === 0 ? `全部 ${overageStats.enabled} 个可超额凭据均已开启` : `已开 ${overageStats.enabled} 个 / 未开 ${overageStats.disabledOff} 个 / 待确定 ${overageStats.unknown} 个`}
+                >
+                  <Zap className={`h-4 w-4 mr-2 ${enablingOverage ? 'animate-pulse' : ''}`} />
+                  {overageRetryableCount === 0
+                    ? `全部已开启超额（${overageStats.enabled}）`
+                    : overageEnableableCount > 0
+                      ? `一键开启超额（${overageEnableableCount}）`
+                      : `重试超额状态（${overageStats.unknown}）`}
+                </Button>
+              )}
+              {data?.credentials && data.credentials.length > 0 && (
+                <Button
+                  onClick={handleDisableQuotaExceeded}
+                  size="sm"
+                  variant="outline"
+                  disabled={disablingQuota || quotaExceededCount === 0}
+                >
+                  <AlertTriangle className="h-4 w-4 mr-2" />
+                  一键超额禁用 ({quotaExceededCount})
+                </Button>
+              )}
+              {data?.credentials && data.credentials.length > 0 && (
+                <Button
                   onClick={handleClearAll}
                   size="sm"
                   variant="outline"
@@ -873,6 +984,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onToggleSelect={() => toggleSelect(credential.id)}
                     balance={balanceMap.get(credential.id) || null}
                     loadingBalance={loadingBalanceIds.has(credential.id)}
+                    onBalanceUpdated={handleBalanceUpdated}
                   />
                 ))}
               </div>
