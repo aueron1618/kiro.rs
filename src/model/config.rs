@@ -102,10 +102,6 @@ pub struct Config {
     #[serde(default = "default_auto_continue_enabled")]
     pub auto_continue_enabled: bool,
 
-    /// 自动续写是否优先按 stop_reason 判定（默认 true）
-    #[serde(default = "default_auto_continue_stop_reason_check_enabled")]
-    pub auto_continue_stop_reason_check_enabled: bool,
-
     /// 自动续写是否使用内部结束工具作为二级判定（默认 true）
     #[serde(default = "default_auto_continue_done_tool_check_enabled")]
     pub auto_continue_done_tool_check_enabled: bool,
@@ -179,10 +175,6 @@ fn default_auto_continue_enabled() -> bool {
     true
 }
 
-fn default_auto_continue_stop_reason_check_enabled() -> bool {
-    true
-}
-
 fn default_auto_continue_done_tool_check_enabled() -> bool {
     true
 }
@@ -223,8 +215,6 @@ impl Default for Config {
             load_balancing_mode: default_load_balancing_mode(),
             extract_thinking: default_extract_thinking(),
             auto_continue_enabled: default_auto_continue_enabled(),
-            auto_continue_stop_reason_check_enabled:
-                default_auto_continue_stop_reason_check_enabled(),
             auto_continue_done_tool_check_enabled: default_auto_continue_done_tool_check_enabled(),
             auto_continue_max_attempts: default_auto_continue_max_attempts(),
             auto_continue_prompt: default_auto_continue_prompt(),

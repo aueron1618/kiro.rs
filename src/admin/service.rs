@@ -384,7 +384,6 @@ impl AdminService {
     ) -> Result<AutoContinueConfigResponse, AdminServiceError> {
         self.update_auto_continue_config(AutoContinueConfigUpdateRequest {
             enabled: Some(req.enabled),
-            stop_reason_check_enabled: None,
             done_tool_check_enabled: None,
             max_attempts: None,
             prompt: None,
@@ -399,9 +398,6 @@ impl AdminService {
         let previous = self.runtime_flags.auto_continue_config_snapshot();
 
         let new_enabled = req.enabled.unwrap_or(previous.enabled);
-        let new_stop_reason_check_enabled = req
-            .stop_reason_check_enabled
-            .unwrap_or(previous.stop_reason_check_enabled);
         let new_done_tool_check_enabled = req
             .done_tool_check_enabled
             .unwrap_or(previous.done_tool_check_enabled);
@@ -421,8 +417,6 @@ impl AdminService {
 
         self.runtime_flags.set_auto_continue_enabled(new_enabled);
         self.runtime_flags
-            .set_auto_continue_stop_reason_check_enabled(new_stop_reason_check_enabled);
-        self.runtime_flags
             .set_auto_continue_done_tool_check_enabled(new_done_tool_check_enabled);
         self.runtime_flags
             .set_auto_continue_max_attempts(new_max_attempts);
@@ -439,7 +433,6 @@ impl AdminService {
             let persist_result = (|| -> anyhow::Result<()> {
                 let mut config = Config::load(config_path)?;
                 config.auto_continue_enabled = new_enabled;
-                config.auto_continue_stop_reason_check_enabled = new_stop_reason_check_enabled;
                 config.auto_continue_done_tool_check_enabled = new_done_tool_check_enabled;
                 config.auto_continue_max_attempts = new_max_attempts;
                 config.auto_continue_prompt = new_prompt.clone();
@@ -450,10 +443,6 @@ impl AdminService {
                 self.runtime_flags
                     .set_auto_continue_enabled(previous.enabled);
                 self.runtime_flags
-                    .set_auto_continue_stop_reason_check_enabled(
-                        previous.stop_reason_check_enabled,
-                    );
-                self.runtime_flags
                     .set_auto_continue_done_tool_check_enabled(previous.done_tool_check_enabled);
                 self.runtime_flags
                     .set_auto_continue_max_attempts(previous.max_attempts);
@@ -463,8 +452,6 @@ impl AdminService {
 
             if let Ok(mut runtime_config) = self.config.write() {
                 runtime_config.auto_continue_enabled = new_enabled;
-                runtime_config.auto_continue_stop_reason_check_enabled =
-                    new_stop_reason_check_enabled;
                 runtime_config.auto_continue_done_tool_check_enabled = new_done_tool_check_enabled;
                 runtime_config.auto_continue_max_attempts = new_max_attempts;
                 runtime_config.auto_continue_prompt = new_prompt;

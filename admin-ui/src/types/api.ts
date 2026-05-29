@@ -111,7 +111,6 @@ export interface EnableOverageAllResult {
 // 自动续写开关响应
 export interface AutoContinueConfigResponse {
   enabled: boolean
-  stopReasonCheckEnabled: boolean
   doneToolCheckEnabled: boolean
   maxAttempts: number
   prompt: string
@@ -125,7 +124,6 @@ export interface SetAutoContinueConfigRequest {
 // 自动续写完整配置更新请求
 export interface AutoContinueConfigUpdateRequest {
   enabled?: boolean
-  stopReasonCheckEnabled?: boolean
   doneToolCheckEnabled?: boolean
   maxAttempts?: number
   prompt?: string

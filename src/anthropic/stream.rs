@@ -182,10 +182,29 @@ fn find_real_thinking_start_tag(buffer: &str) -> Option<usize> {
 /// # 返回值
 /// - `(Some(thinking_content), remaining_text)` — 检测到有效 thinking 块
 /// - `(None, original_text)` — 未检测到，原样返回
-pub(crate) fn extract_thinking_from_complete_text(text: &str) -> (Option<String>, String) {
+/// 完整文本 thinking 提取结果。
+#[derive(Debug, Clone)]
+pub(crate) struct CompleteThinkingExtraction {
+    pub thinking: Option<String>,
+    pub remaining_text: String,
+}
+
+/// 从完整文本中提取 thinking 块，支持未闭合的 partial thinking。
+///
+/// 非流式响应在 thinking 过长被上游截断时，常见形态是只有 `<thinking>` 开始标签，
+/// 没有 `</thinking>` 结束标签。此函数会把这类内容作为 partial thinking 返回，
+/// 以便上层自动续写逻辑可以继续请求，而不是把 `<thinking>...` 泄漏为可见文本。
+pub(crate) fn extract_thinking_from_complete_text_with_status(
+    text: &str,
+) -> CompleteThinkingExtraction {
     let start_pos = match find_real_thinking_start_tag(text) {
         Some(pos) => pos,
-        None => return (None, text.to_string()),
+        None => {
+            return CompleteThinkingExtraction {
+                thinking: None,
+                remaining_text: text.to_string(),
+            };
+        }
     };
 
     let before = &text[..start_pos];
@@ -201,8 +220,8 @@ pub(crate) fn extract_thinking_from_complete_text(text: &str) -> (Option<String>
         let after_tag = end_pos + "</thinking>".len();
         (&after_open[..end_pos], after_open[after_tag..].trim_start())
     } else {
-        // 找不到有效的结束标签，不做提取
-        return (None, text.to_string());
+        // 找不到有效结束标签：认为 thinking 被截断，剩余内容都是 partial thinking。
+        (after_open, "")
     };
 
     // 剥离开头的换行符（与流式处理一致：模型输出 <thinking>\n）
@@ -215,10 +234,13 @@ pub(crate) fn extract_thinking_from_complete_text(text: &str) -> (Option<String>
     }
     remaining.push_str(text_after);
 
-    if thinking_content.is_empty() {
-        (None, remaining)
-    } else {
-        (Some(thinking_content.to_string()), remaining)
+    CompleteThinkingExtraction {
+        thinking: if thinking_content.is_empty() {
+            None
+        } else {
+            Some(thinking_content.to_string())
+        },
+        remaining_text: remaining,
     }
 }
 
@@ -539,6 +561,10 @@ pub struct StreamContext {
     /// 是否需要剥离 thinking 内容开头的换行符
     /// 模型输出 `<thinking>\n` 时，`\n` 可能与标签在同一 chunk 或下一 chunk
     strip_thinking_leading_newline: bool,
+    /// thinking 续写段开头可能重新包裹 `<thinking>`，需要跳过该开始标签并延续当前 thinking 块
+    skip_next_continuation_thinking_start: bool,
+    /// 当前分段已输出的 thinking 文本，用于 thinking 被截断时自动续写
+    current_segment_thinking_text: String,
     /// 当前分段已输出的可见文本，用于自动续写判断
     current_segment_visible_text: String,
     /// 当前分段是否出现了工具调用
@@ -550,6 +576,10 @@ pub struct StreamContext {
 /// 自动续写判断所需的当前分段快照
 #[derive(Debug, Clone)]
 pub struct AutoContinueSegment {
+    /// 当前分段的 thinking 文本（不包含 `<thinking>` 标签）
+    pub thinking_text: String,
+    /// 当前分段是否是在 thinking 阶段被截断，需要续写
+    pub thinking_interrupted: bool,
     /// 当前分段的可见文本（不包含 thinking）
     pub visible_text: String,
     /// 当前分段是否发生过 tool_use
@@ -561,9 +591,9 @@ pub struct AutoContinueSegment {
 }
 
 impl AutoContinueSegment {
-    /// 估算当前分段可见文本的输出 tokens
+    /// 估算当前分段输出 tokens（包含 thinking 和可见文本）
     pub fn estimated_output_tokens(&self) -> i32 {
-        estimate_tokens(&self.visible_text)
+        estimate_tokens(&format!("{}{}", self.thinking_text, self.visible_text))
     }
 }
 
@@ -591,6 +621,8 @@ impl StreamContext {
             thinking_block_index: None,
             text_block_index: None,
             strip_thinking_leading_newline: false,
+            skip_next_continuation_thinking_start: false,
+            current_segment_thinking_text: String::new(),
             current_segment_visible_text: String::new(),
             current_segment_has_tool_use: false,
             current_segment_done_marker_found: false,
@@ -658,28 +690,54 @@ impl StreamContext {
 
     /// 获取当前分段的自动续写判断快照
     pub fn auto_continue_segment(&self) -> AutoContinueSegment {
+        let mut thinking_text = self.current_segment_thinking_text.clone();
+        if self.thinking_enabled && self.in_thinking_block && !self.thinking_buffer.is_empty() {
+            if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(&self.thinking_buffer) {
+                thinking_text.push_str(&self.thinking_buffer[..end_pos]);
+            } else {
+                thinking_text.push_str(&self.thinking_buffer);
+            }
+        }
+
+        let thinking_interrupted = self.thinking_enabled
+            && self.thinking_block_index.is_some()
+            && !self.state_manager.has_non_thinking_blocks()
+            && !thinking_text.trim().is_empty();
+
+        let mut stop_reason = self.state_manager.get_stop_reason();
+        if thinking_interrupted && stop_reason == "end_turn" {
+            stop_reason = "max_tokens".to_string();
+        }
+
         AutoContinueSegment {
+            thinking_text,
+            thinking_interrupted,
             visible_text: self.current_segment_visible_text.clone(),
             has_tool_use: self.current_segment_has_tool_use,
             done_marker_found: self.current_segment_done_marker_found,
-            stop_reason: self.state_manager.get_stop_reason(),
+            stop_reason,
         }
     }
 
     /// 重置当前分段的自动续写统计
     pub fn reset_auto_continue_segment(&mut self) {
+        self.current_segment_thinking_text.clear();
         self.current_segment_visible_text.clear();
         self.current_segment_has_tool_use = false;
         self.current_segment_done_marker_found = false;
 
-        // 自动续写请求会关闭后续上游请求的 thinking 前缀，只让模型继续可见文本。
-        // 因此进入下一段前也要把本地 thinking 解析器切到“已处理”状态，
-        // 避免它继续等待新的 <thinking> 标签而暂存/吞掉续写文本。
+        // 普通自动续写请求会关闭后续上游请求的 thinking 前缀，只让模型继续可见文本。
+        // 如果当前仍处于 thinking 块内，则说明这是 thinking 截断续写：保留解析状态，
+        // 以便下一段继续写入同一个 thinking content block。
         if self.thinking_enabled {
             self.thinking_buffer.clear();
-            self.in_thinking_block = false;
-            self.thinking_extracted = true;
-            self.strip_thinking_leading_newline = false;
+            if self.in_thinking_block {
+                self.strip_thinking_leading_newline = false;
+            } else {
+                self.thinking_extracted = true;
+                self.strip_thinking_leading_newline = false;
+                self.skip_next_continuation_thinking_start = false;
+            }
         }
     }
 
@@ -811,6 +869,26 @@ impl StreamContext {
                     break;
                 }
             } else if self.in_thinking_block {
+                // thinking 截断续写时，上游下一段通常会重新输出 `<thinking>` 包裹。
+                // 对客户端而言仍应延续同一个 thinking block，因此只在续写段开头跳过这个新开始标签。
+                if self.skip_next_continuation_thinking_start {
+                    if let Some(start_pos) = find_real_thinking_start_tag(&self.thinking_buffer) {
+                        if self.thinking_buffer[..start_pos].trim().is_empty() {
+                            self.thinking_buffer =
+                                self.thinking_buffer[start_pos + "<thinking>".len()..].to_string();
+                            self.strip_thinking_leading_newline = true;
+                        }
+                        self.skip_next_continuation_thinking_start = false;
+                    } else {
+                        let trimmed = self.thinking_buffer.trim_start();
+                        if trimmed.is_empty() || "<thinking>".starts_with(trimmed) {
+                            // 可能是跨 chunk 的 `<thinking>` 开始标签，等待更多内容。
+                            break;
+                        }
+                        self.skip_next_continuation_thinking_start = false;
+                    }
+                }
+
                 // 剥离 <thinking> 标签后紧跟的换行符（可能跨 chunk）
                 if self.strip_thinking_leading_newline {
                     if self.thinking_buffer.starts_with('\n') {
@@ -966,7 +1044,11 @@ impl StreamContext {
     }
 
     /// 创建 thinking_delta 事件
-    fn create_thinking_delta_event(&self, index: i32, thinking: &str) -> SseEvent {
+    fn create_thinking_delta_event(&mut self, index: i32, thinking: &str) -> SseEvent {
+        if !thinking.is_empty() {
+            self.current_segment_thinking_text.push_str(thinking);
+        }
+
         SseEvent::new(
             "content_block_delta",
             json!({
@@ -1110,6 +1192,66 @@ impl StreamContext {
         events
     }
 
+    /// 为 thinking 截断续写准备当前消息：flush 剩余 thinking buffer，并尽量延续同一个 thinking 块。
+    ///
+    /// 这不会发送 message_delta/message_stop，也不会补发占位 text。若当前 thinking 尚未闭合，
+    /// 后续自动续写段会继续写入同一个 thinking content block，并跳过续写段重新包裹的 `<thinking>`。
+    pub fn prepare_for_auto_continue_segment(&mut self) -> Vec<SseEvent> {
+        let mut events = Vec::new();
+
+        if !(self.thinking_enabled && self.in_thinking_block) {
+            return events;
+        }
+
+        if !self.thinking_buffer.is_empty() {
+            if let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(&self.thinking_buffer) {
+                let thinking_content = self.thinking_buffer[..end_pos].to_string();
+                if !thinking_content.is_empty() {
+                    if let Some(thinking_index) = self.thinking_block_index {
+                        events.push(
+                            self.create_thinking_delta_event(thinking_index, &thinking_content),
+                        );
+                    }
+                }
+                let after_pos = end_pos + "</thinking>".len();
+                let remaining = self.thinking_buffer[after_pos..].trim_start().to_string();
+                self.thinking_buffer.clear();
+                if !remaining.is_empty() {
+                    events.extend(self.create_text_delta_events(&remaining));
+                }
+
+                self.in_thinking_block = false;
+                self.thinking_extracted = true;
+                self.strip_thinking_leading_newline = false;
+
+                if let Some(thinking_index) = self.thinking_block_index {
+                    events.push(self.create_thinking_delta_event(thinking_index, ""));
+                    if let Some(stop_event) =
+                        self.state_manager.handle_content_block_stop(thinking_index)
+                    {
+                        events.push(stop_event);
+                    }
+                }
+            } else {
+                let thinking_content = std::mem::take(&mut self.thinking_buffer);
+                if !thinking_content.is_empty() {
+                    if let Some(thinking_index) = self.thinking_block_index {
+                        events.push(
+                            self.create_thinking_delta_event(thinking_index, &thinking_content),
+                        );
+                    }
+                }
+                self.skip_next_continuation_thinking_start = true;
+                self.strip_thinking_leading_newline = false;
+            }
+        } else {
+            self.skip_next_continuation_thinking_start = true;
+            self.strip_thinking_leading_newline = false;
+        }
+
+        events
+    }
+
     /// 覆写最终 stop_reason。
     pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
         self.state_manager.set_stop_reason(reason);
@@ -1162,8 +1304,9 @@ impl StreamContext {
                 } else {
                     // 如果还在 thinking 块内，发送剩余内容作为 thinking_delta
                     if let Some(thinking_index) = self.thinking_block_index {
+                        let thinking_buffer = self.thinking_buffer.clone();
                         events.push(
-                            self.create_thinking_delta_event(thinking_index, &self.thinking_buffer),
+                            self.create_thinking_delta_event(thinking_index, &thinking_buffer),
                         );
                     }
                     // 关闭 thinking 块：先发送空的 thinking_delta，再发送 content_block_stop
@@ -1271,6 +1414,12 @@ impl BufferedStreamContext {
     /// 获取当前分段的自动续写快照
     pub fn auto_continue_segment(&self) -> AutoContinueSegment {
         self.inner.auto_continue_segment()
+    }
+
+    /// 为自动续写准备当前分段（flush/关闭未完成 thinking 块）
+    pub fn prepare_for_auto_continue_segment(&mut self) {
+        let events = self.inner.prepare_for_auto_continue_segment();
+        self.event_buffer.extend(events);
     }
 
     /// 重置当前分段的自动续写统计
@@ -2007,6 +2156,74 @@ mod tests {
 
         let text = collect_text_content(&all);
         assert_eq!(text, "world", "text should be 'world', got: {:?}", text);
+    }
+
+    #[test]
+    fn test_auto_continue_segment_detects_interrupted_thinking() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
+        let _initial_events = ctx.generate_initial_events();
+
+        let _events =
+            ctx.process_assistant_response("<thinking>\nvery long reasoning without an end tag");
+        let segment = ctx.auto_continue_segment();
+
+        assert!(
+            segment.thinking_interrupted,
+            "thinking-only unfinished segment should be marked as interrupted"
+        );
+        assert_eq!(segment.stop_reason, "max_tokens");
+        assert!(segment.visible_text.is_empty());
+        assert!(segment.thinking_text.contains("very long reasoning"));
+    }
+
+    #[test]
+    fn test_prepare_for_auto_continue_keeps_interrupted_thinking_open() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
+        let initial_events = ctx.generate_initial_events();
+
+        let mut all_events = initial_events;
+        all_events.extend(ctx.process_assistant_response("<thinking>\npartial reasoning"));
+        all_events.extend(ctx.prepare_for_auto_continue_segment());
+        ctx.reset_auto_continue_segment();
+
+        assert!(
+            ctx.in_thinking_block,
+            "interrupted thinking should remain open for the continuation"
+        );
+        assert!(
+            all_events.iter().all(|e| e.event != "content_block_stop"),
+            "preparing an unfinished thinking continuation must not close the thinking block"
+        );
+        assert!(
+            all_events
+                .iter()
+                .all(|e| e.event != "message_delta" && e.event != "message_stop"),
+            "preparing a continuation must not end the Anthropic message"
+        );
+
+        all_events
+            .extend(ctx.process_assistant_response("<thinking>\ncontinued</thinking>\n\nanswer"));
+        all_events.extend(ctx.generate_final_events());
+
+        let thinking = collect_thinking_content(&all_events);
+        assert_eq!(
+            thinking, "partial reasoningcontinued",
+            "continuation should append to the same thinking block"
+        );
+
+        let thinking_starts = all_events
+            .iter()
+            .filter(|e| {
+                e.event == "content_block_start" && e.data["content_block"]["type"] == "thinking"
+            })
+            .count();
+        assert_eq!(
+            thinking_starts, 1,
+            "continuation must not create a second thinking block"
+        );
+
+        let text = collect_text_content(&all_events);
+        assert_eq!(text, "answer");
     }
 
     #[test]

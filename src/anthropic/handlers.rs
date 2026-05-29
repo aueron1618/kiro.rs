@@ -35,31 +35,24 @@ use super::types::{
 };
 use super::websearch;
 
-/// 触发自动续写所需的最小可见文本长度
-const AUTO_CONTINUE_MIN_VISIBLE_CHARS: usize = 5;
+/// 触发自动续写所需的最小输出字符长度
+const AUTO_CONTINUE_MIN_OUTPUT_CHARS: usize = 5;
 
 fn should_auto_continue(segment: &AutoContinueSegment, runtime_flags: &RuntimeFlags) -> bool {
     if segment.has_tool_use {
         return false;
     }
 
-    if runtime_flags.auto_continue_stop_reason_check_enabled() {
-        match segment.stop_reason.as_str() {
-            "max_tokens" => {}
-            "end_turn" => return false,
-            "tool_use" | "model_context_window_exceeded" => return false,
-            _ => return false,
-        }
-    }
-
-    if runtime_flags.auto_continue_done_tool_check_enabled()
-        && segment.done_marker_found
-        && segment.stop_reason == "max_tokens"
-    {
+    if runtime_flags.auto_continue_done_tool_check_enabled() && segment.done_marker_found {
         return false;
     }
 
-    segment.visible_text.trim().chars().count() > AUTO_CONTINUE_MIN_VISIBLE_CHARS
+    let has_visible_text =
+        segment.visible_text.trim().chars().count() > AUTO_CONTINUE_MIN_OUTPUT_CHARS;
+    let has_truncated_thinking = segment.thinking_interrupted
+        && segment.thinking_text.trim().chars().count() > AUTO_CONTINUE_MIN_OUTPUT_CHARS;
+
+    has_visible_text || has_truncated_thinking
 }
 
 fn auto_continue_done_tool() -> Tool {
@@ -122,22 +115,23 @@ fn apply_auto_continue_instruction(payload: &mut MessagesRequest) {
     }
 }
 
-fn build_auto_continue_payload(
+fn build_auto_continue_payload_with_assistant_content(
     payload: &MessagesRequest,
-    accumulated_assistant_text: &str,
+    assistant_content: serde_json::Value,
     continue_prompt: &str,
+    disable_thinking_for_next_request: bool,
 ) -> MessagesRequest {
     let mut next_payload = payload.clone();
 
-    // thinking 请求的续写历史只追加“可见输出”，并关闭后续请求的 thinking 前缀。
-    // 这样可以避免同一个 Anthropic 响应里出现多段 thinking block，同时仍然让模型基于已输出文本继续写。
-    // 注意：thinking 也可能由模型名的 `-thinking` 后缀触发，因此续写请求必须同时移除该后缀，
-    // 否则 convert_request 会再次注入 thinking 伪协议，导致续写内容泄漏 `<thinking>...</thinking>` 标签。
-    if next_payload
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.is_enabled())
-        || next_payload.model.ends_with("-thinking")
+    // 普通自动续写只追加“可见输出”，因此后续请求需要关闭 thinking 前缀。
+    // thinking 被截断时则保留 thinking 配置，让模型真正“继续思考”。
+    // 注意：thinking 也可能由模型名的 `-thinking` 后缀触发，需要在关闭 thinking 时同时移除该后缀。
+    if disable_thinking_for_next_request
+        && (next_payload
+            .thinking
+            .as_ref()
+            .is_some_and(|t| t.is_enabled())
+            || next_payload.model.ends_with("-thinking"))
     {
         next_payload.thinking = None;
         next_payload.output_config = None;
@@ -148,13 +142,47 @@ fn build_auto_continue_payload(
 
     next_payload.messages.push(Message {
         role: "assistant".to_string(),
-        content: serde_json::Value::String(accumulated_assistant_text.to_string()),
+        content: assistant_content,
     });
     next_payload.messages.push(Message {
         role: "user".to_string(),
         content: serde_json::Value::String(continue_prompt.to_string()),
     });
     next_payload
+}
+
+fn build_auto_continue_payload(
+    payload: &MessagesRequest,
+    accumulated_assistant_text: &str,
+    continue_prompt: &str,
+) -> MessagesRequest {
+    build_auto_continue_payload_with_assistant_content(
+        payload,
+        serde_json::Value::String(accumulated_assistant_text.to_string()),
+        continue_prompt,
+        true,
+    )
+}
+
+fn build_thinking_auto_continue_payload(
+    payload: &MessagesRequest,
+    segment: &AutoContinueSegment,
+    continue_prompt: &str,
+) -> MessagesRequest {
+    let assistant_content = if segment.thinking_text.trim().is_empty() {
+        serde_json::Value::String("<thinking>".to_string())
+    } else {
+        // 这是“thinking 被截断”的历史片段，故意保留未闭合的 <thinking>，
+        // 让上游把续写请求理解为继续同一段思考，而不是开始一段新的最终回答。
+        serde_json::Value::String(format!("<thinking>\n{}", segment.thinking_text))
+    };
+
+    let prompt = format!(
+        "The previous response was truncated while it was still thinking. Continue the same thinking from exactly where it stopped, and only produce the final answer after the reasoning is complete. Do not repeat any previous thinking or visible content.\n\n{}",
+        continue_prompt
+    );
+
+    build_auto_continue_payload_with_assistant_content(payload, assistant_content, &prompt, false)
 }
 
 fn build_request_body(payload: &MessagesRequest) -> anyhow::Result<String> {
@@ -169,12 +197,17 @@ fn build_request_body(payload: &MessagesRequest) -> anyhow::Result<String> {
     serde_json::to_string(&kiro_request).map_err(|e| anyhow::anyhow!("序列化请求失败: {}", e))
 }
 
-fn prepare_auto_continue_request(
+fn prepare_auto_continue_request_for_segment(
     payload: &MessagesRequest,
-    assistant_text: &str,
+    segment: &AutoContinueSegment,
+    accumulated_visible_text: &str,
     continue_prompt: &str,
 ) -> anyhow::Result<(MessagesRequest, String)> {
-    let next_payload = build_auto_continue_payload(payload, assistant_text, continue_prompt);
+    let next_payload = if segment.thinking_interrupted {
+        build_thinking_auto_continue_payload(payload, segment, continue_prompt)
+    } else {
+        build_auto_continue_payload(payload, accumulated_visible_text, continue_prompt)
+    };
     let next_request_body = build_request_body(&next_payload)?;
     Ok((next_payload, next_request_body))
 }
@@ -717,7 +750,7 @@ fn create_sse_stream(
 
                                 if can_continue {
                                     accumulated_visible_text.push_str(&segment.visible_text);
-                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
+                                    match prepare_auto_continue_request_for_segment(&request_template, &segment, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
                                         Ok((next_payload, next_request_body)) => {
                                             tracing::info!(
                                                 "触发自动续写（流式）：第 {} 轮，{}",
@@ -727,12 +760,42 @@ fn create_sse_stream(
 
                                             match provider.call_api_stream(&next_request_body).await {
                                                 Ok(next_response) => {
+                                                    let continuation_events = if segment.thinking_interrupted {
+                                                        ctx.prepare_for_auto_continue_segment()
+                                                    } else {
+                                                        Vec::new()
+                                                    };
                                                     body_stream = next_response.bytes_stream();
                                                     decoder = EventStreamDecoder::new();
                                                     request_started_at = std::time::Instant::now();
                                                     continue_count += 1;
                                                     ctx.reset_auto_continue_segment();
                                                     stop_reasons.pop();
+                                                    if !continuation_events.is_empty() {
+                                                        let bytes: Vec<Result<Bytes, Infallible>> = continuation_events
+                                                            .into_iter()
+                                                            .map(|e| Ok(Bytes::from(e.to_sse_string())))
+                                                            .collect();
+                                                        return Some((
+                                                            stream::iter(bytes),
+                                                            (
+                                                                provider,
+                                                                request_template,
+                                                                request_record_started_at,
+                                                                body_stream,
+                                                                ctx,
+                                                                decoder,
+                                                                false,
+                                                                ping_interval,
+                                                                request_started_at,
+                                                                continue_count,
+                                                                thinking_enabled,
+                                                                runtime_flags,
+                                                                accumulated_visible_text,
+                                                                stop_reasons,
+                                                            ),
+                                                        ));
+                                                    }
                                                     continue;
                                                 }
                                                 Err(err) => {
@@ -829,6 +892,7 @@ fn create_sse_stream(
 
 struct NonStreamSegmentResult {
     content: Vec<serde_json::Value>,
+    thinking_text: String,
     visible_text: String,
     has_tool_use: bool,
     done_marker_found: bool,
@@ -939,26 +1003,34 @@ fn parse_non_stream_segment(
 
     let mut content: Vec<serde_json::Value> = Vec::new();
     let mut visible_text = text_content.clone();
+    let mut thinking_text = String::new();
 
     if thinking_enabled {
-        let (thinking, remaining_text) =
-            super::stream::extract_thinking_from_complete_text(&text_content);
+        let extraction =
+            super::stream::extract_thinking_from_complete_text_with_status(&text_content);
 
-        if let Some(thinking_text) = thinking {
+        if let Some(extracted_thinking) = extraction.thinking {
+            thinking_text = extracted_thinking.clone();
             content.push(json!({
                 "type": "thinking",
-                "thinking": thinking_text
+                "thinking": extracted_thinking
             }));
         }
 
-        if !remaining_text.is_empty() {
+        if !extraction.remaining_text.is_empty() {
             content.push(json!({
                 "type": "text",
-                "text": remaining_text.clone()
+                "text": extraction.remaining_text.clone()
             }));
         }
 
-        visible_text = remaining_text;
+        visible_text = extraction.remaining_text;
+        if !thinking_text.trim().is_empty()
+            && visible_text.trim().is_empty()
+            && stop_reason == "end_turn"
+        {
+            stop_reason = "max_tokens".to_string();
+        }
     } else if !text_content.is_empty() {
         let cleaned_text = text_content.clone();
         content.push(json!({
@@ -972,6 +1044,7 @@ fn parse_non_stream_segment(
 
     NonStreamSegmentResult {
         content,
+        thinking_text,
         visible_text,
         has_tool_use,
         done_marker_found,
@@ -1047,6 +1120,11 @@ async fn handle_non_stream_request(
         }
 
         let segment_snapshot = AutoContinueSegment {
+            thinking_text: segment.thinking_text.clone(),
+            thinking_interrupted: thinking_enabled
+                && !segment.thinking_text.trim().is_empty()
+                && segment.visible_text.trim().is_empty()
+                && segment.stop_reason == "max_tokens",
             visible_text: segment.visible_text.clone(),
             has_tool_use: segment.has_tool_use,
             done_marker_found: segment.done_marker_found,
@@ -1077,8 +1155,9 @@ async fn handle_non_stream_request(
             break;
         }
 
-        match prepare_auto_continue_request(
+        match prepare_auto_continue_request_for_segment(
             &current_request_template,
+            &segment_snapshot,
             &aggregated_visible_text,
             &runtime_flags.auto_continue_prompt(),
         ) {
@@ -1552,7 +1631,7 @@ fn create_buffered_sse_stream(
 
                                 if can_continue {
                                     accumulated_visible_text.push_str(&segment.visible_text);
-                                    match prepare_auto_continue_request(&request_template, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
+                                    match prepare_auto_continue_request_for_segment(&request_template, &segment, &accumulated_visible_text, &runtime_flags.auto_continue_prompt()) {
                                         Ok((next_payload, next_request_body)) => {
                                             tracing::info!(
                                                 "触发自动续写（缓冲流）：第 {} 轮，{}",
@@ -1562,7 +1641,10 @@ fn create_buffered_sse_stream(
 
                                             match provider.call_api_stream(&next_request_body).await {
                                                 Ok(next_response) => {
-                                                    body_stream = next_response.bytes_stream();
+                                                    if segment.thinking_interrupted {
+                                                        ctx.prepare_for_auto_continue_segment();
+                                                    }
+                                                                                                body_stream = next_response.bytes_stream();
                                                     decoder = EventStreamDecoder::new();
                                                     request_started_at = std::time::Instant::now();
                                                     continue_count += 1;

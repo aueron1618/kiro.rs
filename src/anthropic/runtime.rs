@@ -10,7 +10,6 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct RuntimeFlags {
     auto_continue_enabled: AtomicBool,
-    auto_continue_stop_reason_check_enabled: AtomicBool,
     auto_continue_done_tool_check_enabled: AtomicBool,
     auto_continue_max_attempts: AtomicUsize,
     auto_continue_prompt: RwLock<String>,
@@ -21,7 +20,6 @@ pub struct RuntimeFlags {
 #[serde(rename_all = "camelCase")]
 pub struct AutoContinueConfigSnapshot {
     pub enabled: bool,
-    pub stop_reason_check_enabled: bool,
     pub done_tool_check_enabled: bool,
     pub max_attempts: usize,
     pub prompt: String,
@@ -58,14 +56,12 @@ const MAX_AUTO_CONTINUE_REQUEST_RECORDS: usize = 200;
 impl RuntimeFlags {
     pub fn new_with_auto_continue_config(
         auto_continue_enabled: bool,
-        stop_reason_check_enabled: bool,
         done_tool_check_enabled: bool,
         max_attempts: usize,
         prompt: String,
     ) -> Self {
         Self {
             auto_continue_enabled: AtomicBool::new(auto_continue_enabled),
-            auto_continue_stop_reason_check_enabled: AtomicBool::new(stop_reason_check_enabled),
             auto_continue_done_tool_check_enabled: AtomicBool::new(done_tool_check_enabled),
             auto_continue_max_attempts: AtomicUsize::new(max_attempts),
             auto_continue_prompt: RwLock::new(prompt),
@@ -81,16 +77,6 @@ impl RuntimeFlags {
 
     pub fn set_auto_continue_enabled(&self, enabled: bool) {
         self.auto_continue_enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    pub fn auto_continue_stop_reason_check_enabled(&self) -> bool {
-        self.auto_continue_stop_reason_check_enabled
-            .load(Ordering::Relaxed)
-    }
-
-    pub fn set_auto_continue_stop_reason_check_enabled(&self, enabled: bool) {
-        self.auto_continue_stop_reason_check_enabled
-            .store(enabled, Ordering::Relaxed);
     }
 
     pub fn auto_continue_done_tool_check_enabled(&self) -> bool {
@@ -128,7 +114,6 @@ impl RuntimeFlags {
     pub fn auto_continue_config_snapshot(&self) -> AutoContinueConfigSnapshot {
         AutoContinueConfigSnapshot {
             enabled: self.auto_continue_enabled(),
-            stop_reason_check_enabled: self.auto_continue_stop_reason_check_enabled(),
             done_tool_check_enabled: self.auto_continue_done_tool_check_enabled(),
             max_attempts: self.auto_continue_max_attempts(),
             prompt: self.auto_continue_prompt(),

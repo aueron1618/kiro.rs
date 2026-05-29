@@ -248,8 +248,6 @@ pub struct SetLoadBalancingModeRequest {
 pub struct AutoContinueConfigResponse {
     /// 是否启用自动续写
     pub enabled: bool,
-    /// 是否启用 stop_reason 判定
-    pub stop_reason_check_enabled: bool,
     /// 是否启用结束工具判定
     pub done_tool_check_enabled: bool,
     /// 最大续写次数
@@ -262,7 +260,6 @@ impl From<anthropic::runtime::AutoContinueConfigSnapshot> for AutoContinueConfig
     fn from(snapshot: anthropic::runtime::AutoContinueConfigSnapshot) -> Self {
         Self {
             enabled: snapshot.enabled,
-            stop_reason_check_enabled: snapshot.stop_reason_check_enabled,
             done_tool_check_enabled: snapshot.done_tool_check_enabled,
             max_attempts: snapshot.max_attempts,
             prompt: snapshot.prompt,
@@ -283,7 +280,6 @@ pub struct SetAutoContinueConfigRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AutoContinueConfigUpdateRequest {
     pub enabled: Option<bool>,
-    pub stop_reason_check_enabled: Option<bool>,
     pub done_tool_check_enabled: Option<bool>,
     pub max_attempts: Option<usize>,
     pub prompt: Option<String>,
