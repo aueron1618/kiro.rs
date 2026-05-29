@@ -674,62 +674,66 @@ export function Dashboard({ onLogout }: DashboardProps) {
     <div className="min-h-screen bg-background">
       {/* 顶部导航 */}
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container flex h-14 items-center justify-between px-4 md:px-8">
-          <div className="flex items-center gap-2">
+        <div className="container flex min-h-14 flex-wrap items-center justify-between gap-2 px-3 py-2 sm:flex-nowrap sm:px-4 md:px-8">
+          <div className="flex min-w-0 items-center gap-2">
             <Server className="h-5 w-5" />
             <span className="font-semibold">Kiro Admin</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-1 sm:gap-2">
             <Button
               variant="outline"
               size="sm"
               onClick={handleToggleLoadBalancing}
               disabled={isLoadingMode || isSettingMode}
               title="切换负载均衡模式"
+              className="min-w-0 max-w-[9rem] px-2 text-xs sm:max-w-none sm:px-3 sm:text-sm"
             >
               {isLoadingMode ? '加载中...' : (loadBalancingData?.mode === 'priority' ? '优先级模式' : '均衡负载')}
             </Button>
-            <Button variant="ghost" size="icon" onClick={toggleDarkMode}>
+            <Button variant="ghost" size="icon" onClick={toggleDarkMode} className="h-9 w-9 shrink-0 sm:h-10 sm:w-10">
               {darkMode ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleRefresh}>
+            <Button variant="ghost" size="icon" onClick={handleRefresh} className="h-9 w-9 shrink-0 sm:h-10 sm:w-10">
               <RefreshCw className="h-5 w-5" />
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleLogout}>
+            <Button variant="ghost" size="icon" onClick={handleLogout} className="h-9 w-9 shrink-0 sm:h-10 sm:w-10">
               <LogOut className="h-5 w-5" />
             </Button>
           </div>
         </div>
-        <div className="container flex h-11 items-center gap-2 px-4 md:px-8 border-t">
+        <div className="container flex min-h-11 items-center gap-2 overflow-x-auto border-t px-3 py-1.5 sm:px-4 md:px-8">
           <Button
             variant={activeTab === 'credentials' ? 'default' : 'ghost'}
             size="sm"
+            className="shrink-0"
             onClick={() => setActiveTab('credentials')}
           >凭证管理</Button>
           <Button
             variant={activeTab === 'requests' ? 'default' : 'ghost'}
             size="sm"
+            className="shrink-0"
             onClick={() => setActiveTab('requests')}
           >请求</Button>
           <Button
             variant={activeTab === 'settings' ? 'default' : 'ghost'}
             size="sm"
+            className="shrink-0"
             onClick={() => setActiveTab('settings')}
           >设置</Button>
         </div>
       </header>
 
       {/* 主内容 */}
-      <main className="container mx-auto px-4 md:px-8 py-6">
+      <main className="container mx-auto px-3 py-4 sm:px-4 sm:py-6 md:px-8">
         {activeTab === 'settings' ? (
         <>
         <div className="grid gap-4 md:grid-cols-2 mb-6">
           <Card>
-            <CardHeader>
+            <CardHeader className="p-4 sm:p-6">
               <CardTitle className="text-base">自动续写设置</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between rounded-md border p-3">
+            <CardContent className="space-y-4 px-4 pb-4 sm:px-6 sm:pb-6">
+              <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="font-medium">续写开关</div>
                   <div className="text-sm text-muted-foreground">控制后端自动续写功能，切换后即时生效</div>
@@ -740,7 +744,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   onCheckedChange={(enabled) => handleUpdateAutoContinue({ enabled })}
                 />
               </div>
-              <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="font-medium">stop_reason 判断</div>
                   <div className="text-sm text-muted-foreground">优先判断 max_tokens / end_turn，只有 max_tokens 才允许续写</div>
@@ -751,7 +755,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   onCheckedChange={(stopReasonCheckEnabled) => handleUpdateAutoContinue({ stopReasonCheckEnabled })}
                 />
               </div>
-              <div className="flex items-center justify-between rounded-md border p-3">
+              <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <div className="font-medium">结束工具判断</div>
                   <div className="text-sm text-muted-foreground">当 stop_reason 为 max_tokens 时，再用 auto_continue_done 作为二级结束信号</div>
@@ -765,10 +769,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </CardContent>
           </Card>
           <Card>
-            <CardHeader>
+            <CardHeader className="p-4 sm:p-6">
               <CardTitle className="text-base">续写参数</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-4 px-4 pb-4 sm:px-6 sm:pb-6">
               <div className="space-y-2">
                 <label className="text-sm font-medium">续写次数</label>
                 <input
@@ -782,7 +786,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 />
               </div>
               <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                   <label className="text-sm font-medium">续写提示词</label>
                   <div className="flex items-center gap-2">
                     {promptDirty && <span className="text-xs text-muted-foreground">未保存</span>}
@@ -815,33 +819,33 @@ export function Dashboard({ onLogout }: DashboardProps) {
         {/* 统计卡片 */}
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="p-4 pb-2 sm:p-6 sm:pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
                 凭据总数
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-4 pb-4 sm:px-6 sm:pb-6">
               <div className="text-2xl font-bold">{data?.total || 0}</div>
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="p-4 pb-2 sm:p-6 sm:pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
                 可用凭据
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="px-4 pb-4 sm:px-6 sm:pb-6">
               <div className="text-2xl font-bold text-green-600">{data?.available || 0}</div>
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="p-4 pb-2 sm:p-6 sm:pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
                 当前活跃
               </CardTitle>
             </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold flex items-center gap-2">
+            <CardContent className="px-4 pb-4 sm:px-6 sm:pb-6">
+              <div className="flex flex-wrap items-center gap-2 text-2xl font-bold">
                 #{data?.currentId || '-'}
                 <Badge variant="success">活跃</Badge>
               </div>
@@ -851,11 +855,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
         {/* 凭据列表 */}
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
               <h2 className="text-xl font-semibold">凭据管理</h2>
               {selectedIds.size > 0 && (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">已选择 {selectedIds.size} 个</Badge>
                   <Button onClick={deselectAll} size="sm" variant="ghost">
                     取消选择
@@ -863,10 +867,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 </div>
               )}
             </div>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-2 gap-2 lg:flex lg:flex-wrap lg:justify-end">
               {selectedIds.size > 0 && (
                 <>
-                  <Button onClick={handleBatchVerify} size="sm" variant="outline">
+                  <Button onClick={handleBatchVerify} size="sm" variant="outline" className="min-w-0 px-2 lg:w-auto lg:px-3">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
                     批量验活
                   </Button>
@@ -875,11 +879,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     size="sm"
                     variant="outline"
                     disabled={batchRefreshing}
+                    className="min-w-0 px-2 lg:w-auto lg:px-3"
                   >
                     <RefreshCw className={`h-4 w-4 mr-2 ${batchRefreshing ? 'animate-spin' : ''}`} />
                     {batchRefreshing ? `刷新中... ${batchRefreshProgress.current}/${batchRefreshProgress.total}` : '批量刷新 Token'}
                   </Button>
-                  <Button onClick={handleBatchResetFailure} size="sm" variant="outline">
+                  <Button onClick={handleBatchResetFailure} size="sm" variant="outline" className="min-w-0 px-2 lg:w-auto lg:px-3">
                     <RotateCcw className="h-4 w-4 mr-2" />
                     恢复异常
                   </Button>
@@ -889,6 +894,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     variant="destructive"
                     disabled={selectedDisabledCount === 0}
                     title={selectedDisabledCount === 0 ? '只能删除已禁用凭据' : undefined}
+                    className="min-w-0 px-2 lg:w-auto lg:px-3"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
                     批量删除
@@ -896,7 +902,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 </>
               )}
               {verifying && !verifyDialogOpen && (
-                <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary">
+                <Button onClick={() => setVerifyDialogOpen(true)} size="sm" variant="secondary" className="min-w-0 px-2 lg:w-auto lg:px-3">
                   <CheckCircle2 className="h-4 w-4 mr-2 animate-spin" />
                   验活中... {verifyProgress.current}/{verifyProgress.total}
                 </Button>
@@ -907,6 +913,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   size="sm"
                   variant="outline"
                   disabled={queryingInfo}
+                  className="min-w-0 px-2 lg:w-auto lg:px-3"
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${queryingInfo ? 'animate-spin' : ''}`} />
                   {queryingInfo ? `查询中... ${queryInfoProgress.current}/${queryInfoProgress.total}` : '查询信息'}
@@ -919,6 +926,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   variant="outline"
                   disabled={enablingOverage || overageRetryableCount === 0}
                   title={overageRetryableCount === 0 ? `全部 ${overageStats.enabled} 个可超额凭据均已开启` : `已开 ${overageStats.enabled} 个 / 未开 ${overageStats.disabledOff} 个 / 待确定 ${overageStats.unknown} 个`}
+                  className="min-w-0 px-2 lg:w-auto lg:px-3"
                 >
                   <Zap className={`h-4 w-4 mr-2 ${enablingOverage ? 'animate-pulse' : ''}`} />
                   {overageRetryableCount === 0
@@ -934,6 +942,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   size="sm"
                   variant="outline"
                   disabled={disablingQuota || quotaExceededCount === 0}
+                  className="min-w-0 px-2 lg:w-auto lg:px-3"
                 >
                   <AlertTriangle className="h-4 w-4 mr-2" />
                   一键超额禁用 ({quotaExceededCount})
@@ -944,23 +953,23 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   onClick={handleClearAll}
                   size="sm"
                   variant="outline"
-                  className="text-destructive hover:text-destructive"
                   disabled={disabledCredentialCount === 0}
                   title={disabledCredentialCount === 0 ? '没有可清除的已禁用凭据' : undefined}
+                  className="min-w-0 px-2 text-destructive hover:text-destructive lg:w-auto lg:px-3"
                 >
                   <Trash2 className="h-4 w-4 mr-2" />
                   清除已禁用
                 </Button>
               )}
-              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">
+              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline" className="min-w-0 px-2 lg:w-auto lg:px-3">
                 <FileUp className="h-4 w-4 mr-2" />
-                Kiro Account Manager 导入
+                <span className="truncate">Kiro Account Manager 导入</span>
               </Button>
-              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">
+              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline" className="min-w-0 px-2 lg:w-auto lg:px-3">
                 <Upload className="h-4 w-4 mr-2" />
                 批量导入
               </Button>
-              <Button onClick={() => setAddDialogOpen(true)} size="sm">
+              <Button onClick={() => setAddDialogOpen(true)} size="sm" className="min-w-0 px-2 lg:w-auto lg:px-3">
                 <Plus className="h-4 w-4 mr-2" />
                 添加凭据
               </Button>
@@ -991,7 +1000,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
               {/* 分页控件 */}
               {totalPages > 1 && (
-                <div className="flex justify-center items-center gap-4 mt-6">
+                <div className="mt-6 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center sm:gap-4">
                   <Button
                     variant="outline"
                     size="sm"
@@ -1000,7 +1009,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   >
                     上一页
                   </Button>
-                  <span className="text-sm text-muted-foreground">
+                  <span className="text-center text-sm text-muted-foreground">
                     第 {currentPage} / {totalPages} 页（共 {data?.credentials.length} 个凭据）
                   </span>
                   <Button
@@ -1021,10 +1030,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
           <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-xl font-semibold">请求记录</h2>
-              <div className="flex items-center gap-3">
+              <div className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:grid-cols-[auto_auto_auto] sm:items-center sm:gap-3">
                 <Badge variant="secondary">{autoContinueRequests.length} 条</Badge>
                 <div
-                  className="flex items-center gap-2 rounded-md border px-3 py-1.5"
+                  className="flex items-center justify-between gap-2 rounded-md border px-3 py-1.5 sm:justify-start"
                   title="开启后每 5 秒自动刷新请求记录"
                 >
                   <span className="text-sm text-muted-foreground whitespace-nowrap">自动刷新</span>
@@ -1039,6 +1048,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                   size="sm"
                   onClick={() => refetchAutoContinueRequests()}
                   disabled={isFetchingAutoContinueRequests}
+                  className="min-w-0 px-2 sm:w-auto sm:px-3"
                 >
                   <RefreshCw className={`h-4 w-4 mr-2 ${isFetchingAutoContinueRequests ? 'animate-spin' : ''}`} />
                   手动刷新
@@ -1046,8 +1056,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </div>
             </div>
             <Card>
-              <CardContent className="p-0 overflow-x-auto">
-                <table className="w-full text-sm">
+              <CardContent className="overflow-x-auto p-0">
+                <table className="w-full min-w-[720px] text-sm">
                   <thead className="border-b bg-muted/40">
                     <tr>
                       <th className="px-4 py-3 text-left font-medium">时间</th>

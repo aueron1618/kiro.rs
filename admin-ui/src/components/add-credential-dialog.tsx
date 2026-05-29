@@ -106,13 +106,13 @@ export function AddCredentialDialog({ open, onOpenChange }: AddCredentialDialogP
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col">
+      <DialogContent className="flex max-h-[calc(100dvh-1rem)] flex-col sm:max-w-lg sm:max-h-[85vh]">
         <DialogHeader>
           <DialogTitle>添加凭据</DialogTitle>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1">
-          <div className="space-y-4 py-4 overflow-y-auto flex-1 pr-1">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-4 pr-1">
             {/* 认证方式 */}
             <div className="space-y-2">
               <label htmlFor="authMethod" className="text-sm font-medium">

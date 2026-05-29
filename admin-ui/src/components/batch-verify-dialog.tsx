@@ -46,7 +46,7 @@ export function BatchVerifyDialog({
           {/* 进度显示 */}
           {verifying && (
             <div className="space-y-2">
-              <div className="flex justify-between text-sm">
+              <div className="flex flex-col gap-1 text-sm sm:flex-row sm:justify-between">
                 <span>验活进度</span>
                 <span>{progress.current} / {progress.total}</span>
               </div>
@@ -61,7 +61,7 @@ export function BatchVerifyDialog({
 
           {/* 统计信息 */}
           {results.size > 0 && (
-            <div className="flex justify-between text-sm font-medium">
+            <div className="flex flex-col gap-1 text-sm font-medium sm:flex-row sm:justify-between">
               <span>验活结果</span>
               <span>
                 成功: {successCount} / 失败: {failedCount}
@@ -86,10 +86,10 @@ export function BatchVerifyDialog({
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="font-medium">凭据 #{result.id}</span>
                       {result.status === 'success' && result.usage && (
-                        <Badge variant="secondary" className="text-xs">
+                        <Badge variant="secondary" className="break-all text-xs">
                           {result.usage}
                         </Badge>
                       )}
@@ -102,7 +102,7 @@ export function BatchVerifyDialog({
                     </span>
                   </div>
                   {result.error && (
-                    <div className="text-xs mt-1 opacity-90">
+                    <div className="mt-1 break-words text-xs opacity-90">
                       错误: {result.error}
                     </div>
                   )}
@@ -119,13 +119,14 @@ export function BatchVerifyDialog({
           )}
         </div>
 
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-row flex-wrap justify-end gap-2">
           {verifying ? (
             <>
               <Button
                 type="button"
                 variant="outline"
                 onClick={() => onOpenChange(false)}
+                className="min-w-24"
               >
                 后台运行
               </Button>
@@ -133,6 +134,7 @@ export function BatchVerifyDialog({
                 type="button"
                 variant="destructive"
                 onClick={onCancel}
+                className="min-w-24"
               >
                 取消验活
               </Button>
@@ -141,6 +143,7 @@ export function BatchVerifyDialog({
             <Button
               type="button"
               onClick={() => onOpenChange(false)}
+              className="min-w-24"
             >
               关闭
             </Button>

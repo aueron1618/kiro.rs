@@ -71,7 +71,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
 
             {/* 使用进度 */}
             <div className="space-y-2">
-              <div className="flex justify-between text-sm">
+              <div className="flex flex-col gap-1 text-sm sm:flex-row sm:justify-between">
                 <span>已使用: ${formatNumber(balance.currentUsage)}</span>
                 <span>限额: ${formatNumber(balance.usageLimit)}</span>
               </div>
@@ -82,7 +82,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
             </div>
 
             {/* 详细信息 */}
-            <div className="grid grid-cols-2 gap-4 pt-4 border-t text-sm">
+            <div className="grid grid-cols-2 gap-3 border-t pt-4 text-sm sm:gap-4">
               <div>
                 <span className="text-muted-foreground">
                   {balance.remaining < 0 ? '已超额：' : '剩余额度：'}
@@ -97,7 +97,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
                   {formatDate(balance.nextResetAt)}
                 </span>
               </div>
-              <div className="col-span-2">
+              <div className="col-span-2 flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="text-muted-foreground">超额状态：</span>
                 <span className="font-medium">
                   {balance.overageCapable === false
@@ -109,7 +109,7 @@ export function BalanceDialog({ credentialId, open, onOpenChange }: BalanceDialo
                         : '未知'}
                 </span>
                 {balance.overageCapabilityRaw && (
-                  <span className="text-xs text-muted-foreground ml-2">
+                  <span className="break-all text-xs text-muted-foreground">
                     ({balance.overageCapabilityRaw})
                   </span>
                 )}

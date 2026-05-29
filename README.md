@@ -441,7 +441,11 @@ RUST_LOG=debug ./target/release/kiro-rs
 - `claude-<family>-4.<minor>(-thinking)` → `claude-<family>-4.<minor>`
 - 其他模型名保持原样透传给上游，由上游决定是否报错
 
-例如：`claude-opus-4-7-thinking` 会规范化为 `claude-opus-4.7`，而 `claude-opus-4-20250514` 不会再被本项目兜底改写到 `claude-opus-4.6`。
+例如：`claude-opus-4-8-thinking` 会规范化为 `claude-opus-4.8`，而 `claude-opus-4-20250514` 不会再被本项目兜底改写到 `claude-opus-4.6`。
+
+> **1M 上下文支持**：Kiro 于 2026-03-24 将 Sonnet 4.6 / Opus 4.6 升级到 1M 上下文窗口，Opus 4.7 / 4.8 同样为 1M。其余模型仍为 200K。
+>
+> 模型名带 `-thinking` 后缀（如 `claude-opus-4-8-thinking`）会自动覆写 `thinking` 配置：Opus 4.6 / 4.7 / 4.8 走 `adaptive` 模式并强制 `output_config.effort = "high"`，其他走 `enabled` 模式，`budget_tokens` 固定 20000。
 
 ## Admin（可选）
 

@@ -110,12 +110,13 @@ pub fn map_model(model: &str) -> String {
 /// 根据模型名称返回对应的上下文窗口大小
 ///
 /// 复用 `map_model` 的规范化逻辑，确保窗口大小判断与模型映射一致。
-/// Kiro 于 2026-03-24 将 Opus 4.6、Opus 4.7 和 Sonnet 4.6 升级至 1M 上下文。
+/// Kiro 于 2026-03-24 将 Opus 4.6、Opus 4.7、Opus 4.8 和 Sonnet 4.6 升级至 1M 上下文。
 pub fn get_context_window_size(model: &str) -> i32 {
     let mapped = map_model(model);
     if mapped == "claude-sonnet-4.6"
         || mapped == "claude-opus-4.6"
         || mapped == "claude-opus-4.7"
+        || mapped == "claude-opus-4.8"
     {
         1_000_000
     } else {
@@ -973,6 +974,11 @@ mod tests {
             map_model("claude-opus-4-8-thinking"),
             "claude-opus-4.8".to_string()
         );
+    }
+
+    #[test]
+    fn test_get_context_window_size_opus_4_8() {
+        assert_eq!(get_context_window_size("claude-opus-4-8-thinking"), 1_000_000);
     }
 
     #[test]

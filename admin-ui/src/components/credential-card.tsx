@@ -210,14 +210,14 @@ export function CredentialCard({
   return (
     <>
       <Card className={`${credential.isCurrent ? 'ring-2 ring-primary' : ''} ${!credential.disabled && isQuotaExceeded ? 'ring-1 ring-yellow-500/70' : ''} ${disabledByQuota ? 'ring-1 ring-yellow-500/80 bg-yellow-50/40 dark:bg-yellow-500/[0.04]' : ''}`}>
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+        <CardHeader className="p-4 pb-2 sm:p-6 sm:pb-2">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex min-w-0 items-start gap-2">
               <Checkbox
                 checked={selected}
                 onCheckedChange={onToggleSelect}
               />
-              <CardTitle className="text-lg flex items-center gap-2">
+              <CardTitle className="flex min-w-0 flex-wrap items-center gap-2 break-all text-base sm:text-lg">
                 {credential.email || `凭据 #${credential.id}`}
                 {credential.isCurrent && (
                   <Badge variant="success">当前</Badge>
@@ -246,7 +246,7 @@ export function CredentialCard({
                 )}
               </CardTitle>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center justify-between gap-2 sm:justify-start">
               <span className="text-sm text-muted-foreground">启用</span>
               <Switch
                 checked={!credential.disabled}
@@ -256,13 +256,13 @@ export function CredentialCard({
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-4 px-4 pb-4 sm:px-6 sm:pb-6">
           {/* 信息网格 */}
-          <div className="grid grid-cols-2 gap-4 text-sm">
+          <div className="grid grid-cols-2 gap-3 text-sm sm:gap-4">
             <div>
               <span className="text-muted-foreground">优先级：</span>
               {editingPriority ? (
-                <div className="inline-flex items-center gap-1 ml-1">
+                <div className="mt-2 flex flex-wrap items-center gap-1 sm:mt-0 sm:inline-flex sm:ml-1">
                   <Input
                     type="number"
                     value={priorityValue}
@@ -332,7 +332,7 @@ export function CredentialCard({
             {credential.maskedApiKey && (
               <div className="col-span-2">
                 <span className="text-muted-foreground">API Key：</span>
-                <span className="font-mono font-medium">{credential.maskedApiKey}</span>
+                <span className="break-all font-mono font-medium">{credential.maskedApiKey}</span>
               </div>
             )}
             <div className="col-span-2">
@@ -363,7 +363,7 @@ export function CredentialCard({
             {credential.hasProxy && (
               <div className="col-span-2">
                 <span className="text-muted-foreground">代理：</span>
-                <span className="font-medium">{credential.proxyUrl}</span>
+                <span className="break-all font-medium">{credential.proxyUrl}</span>
               </div>
             )}
             {credential.hasProfileArn && (
@@ -374,12 +374,13 @@ export function CredentialCard({
           </div>
 
           {/* 操作按钮 */}
-          <div className="flex flex-wrap gap-2 pt-2 border-t">
+          <div className="grid grid-cols-2 gap-2 border-t pt-2 lg:flex lg:flex-wrap">
             <Button
               size="sm"
               variant="outline"
               onClick={handleReset}
               disabled={resetFailure.isPending || (credential.failureCount === 0 && credential.refreshFailureCount === 0)}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <RefreshCw className="h-4 w-4 mr-1" />
               重置失败
@@ -390,6 +391,7 @@ export function CredentialCard({
               onClick={handleForceRefresh}
               disabled={forceRefresh.isPending || credential.disabled || credential.authMethod === 'api_key'}
               title={credential.authMethod === 'api_key' ? 'API Key 凭据无需刷新 Token' : credential.disabled ? '已禁用的凭据无法刷新 Token' : '强制刷新 Token'}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <RefreshCw className={`h-4 w-4 mr-1 ${forceRefresh.isPending ? 'animate-spin' : ''}`} />
               刷新 Token
@@ -408,6 +410,7 @@ export function CredentialCard({
                 )
               }}
               disabled={setPriority.isPending || credential.priority === 0}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <ChevronUp className="h-4 w-4 mr-1" />
               提高优先级
@@ -426,6 +429,7 @@ export function CredentialCard({
                 )
               }}
               disabled={setPriority.isPending}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <ChevronDown className="h-4 w-4 mr-1" />
               降低优先级
@@ -434,6 +438,7 @@ export function CredentialCard({
               size="sm"
               variant="default"
               onClick={() => onViewBalance(credential.id)}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <Wallet className="h-4 w-4 mr-1" />
               查看余额
@@ -445,6 +450,7 @@ export function CredentialCard({
                   variant="outline"
                   onClick={() => handleSetOverage(false)}
                   disabled={overageBusy || credential.disabled}
+                  className="min-w-0 px-2 lg:w-auto lg:px-3"
                 >
                   <ZapOff className="h-4 w-4 mr-1" />
                   关闭超额
@@ -455,6 +461,7 @@ export function CredentialCard({
                   variant="outline"
                   onClick={() => handleSetOverage(true)}
                   disabled={overageBusy || credential.disabled}
+                  className="min-w-0 px-2 lg:w-auto lg:px-3"
                 >
                   <Zap className="h-4 w-4 mr-1" />
                   开启超额
@@ -467,6 +474,7 @@ export function CredentialCard({
               onClick={() => setShowDeleteDialog(true)}
               disabled={!credential.disabled}
               title={!credential.disabled ? '需要先禁用凭据才能删除' : undefined}
+              className="min-w-0 px-2 lg:w-auto lg:px-3"
             >
               <Trash2 className="h-4 w-4 mr-1" />
               删除

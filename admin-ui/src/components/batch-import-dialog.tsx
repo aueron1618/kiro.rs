@@ -411,12 +411,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
         onOpenChange(newOpen)
       }}
     >
-      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
+      <DialogContent className="flex max-h-[calc(100dvh-1rem)] flex-col sm:max-w-2xl sm:max-h-[80vh]">
         <DialogHeader>
           <DialogTitle>批量导入凭据（自动验活）</DialogTitle>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto space-y-4 py-4">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto py-4 pr-1">
           <div className="space-y-2">
             <label className="text-sm font-medium">
               JSON 格式凭据
@@ -426,7 +426,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               value={jsonInput}
               onChange={(e) => setJsonInput(e.target.value)}
               disabled={importing}
-              className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono"
+              className="flex min-h-[160px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-[200px]"
             />
             <p className="text-xs text-muted-foreground">
               💡 导入时自动验活，失败的凭据会被排除
@@ -437,7 +437,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             <>
               {/* 进度条 */}
               <div className="space-y-2">
-                <div className="flex justify-between text-sm">
+                <div className="flex flex-col gap-1 text-sm sm:flex-row sm:justify-between">
                   <span>{importing ? '验活进度' : '验活完成'}</span>
                   <span>{progress.current} / {progress.total}</span>
                 </div>
@@ -455,7 +455,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
               </div>
 
               {/* 统计 */}
-              <div className="flex gap-4 text-sm">
+              <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
                 <span className="text-green-600 dark:text-green-400">
                   ✓ 成功: {results.filter(r => r.status === 'verified').length}
                 </span>
@@ -474,8 +474,8 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                     <div className="flex items-start gap-3">
                       {getStatusIcon(result.status)}
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="break-all text-sm font-medium">
                             {result.email || `凭据 #${result.index}`}
                           </span>
                           <span className="text-xs text-muted-foreground">
@@ -488,12 +488,12 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
                           </div>
                         )}
                         {result.error && (
-                          <div className="text-xs text-red-600 dark:text-red-400 mt-1">
+                          <div className="mt-1 break-words text-xs text-red-600 dark:text-red-400">
                             {result.error}
                           </div>
                         )}
                         {result.rollbackError && (
-                          <div className="text-xs text-red-600 dark:text-red-400 mt-1">
+                          <div className="mt-1 break-words text-xs text-red-600 dark:text-red-400">
                             回滚失败: {result.rollbackError}
                           </div>
                         )}
