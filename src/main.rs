@@ -42,7 +42,6 @@ async fn main() {
     let runtime_config = Arc::new(RwLock::new(config.clone()));
     let runtime_flags = Arc::new(anthropic::RuntimeFlags::new_with_auto_continue_config(
         config.auto_continue_enabled,
-        config.auto_continue_stop_reason_check_enabled,
         config.auto_continue_done_tool_check_enabled,
         config.auto_continue_max_attempts,
         config.auto_continue_prompt.clone(),

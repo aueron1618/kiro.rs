@@ -1110,11 +1110,6 @@ impl StreamContext {
         events
     }
 
-    /// 覆写最终 stop_reason。
-    pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
-        self.state_manager.set_stop_reason(reason);
-    }
-
     /// 获取最终输入 tokens（优先使用 contextUsageEvent 计算值）
     pub fn final_input_tokens(&self) -> i32 {
         self.context_input_tokens.unwrap_or(self.input_tokens)
@@ -1276,11 +1271,6 @@ impl BufferedStreamContext {
     /// 重置当前分段的自动续写统计
     pub fn reset_auto_continue_segment(&mut self) {
         self.inner.reset_auto_continue_segment();
-    }
-
-    /// 覆写最终 stop_reason。
-    pub fn set_stop_reason(&mut self, reason: impl Into<String>) {
-        self.inner.set_stop_reason(reason);
     }
 
     /// 获取最终输入 tokens（优先使用 contextUsageEvent 计算值）

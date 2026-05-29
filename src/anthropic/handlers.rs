@@ -43,19 +43,7 @@ fn should_auto_continue(segment: &AutoContinueSegment, runtime_flags: &RuntimeFl
         return false;
     }
 
-    if runtime_flags.auto_continue_stop_reason_check_enabled() {
-        match segment.stop_reason.as_str() {
-            "max_tokens" => {}
-            "end_turn" => return false,
-            "tool_use" | "model_context_window_exceeded" => return false,
-            _ => return false,
-        }
-    }
-
-    if runtime_flags.auto_continue_done_tool_check_enabled()
-        && segment.done_marker_found
-        && segment.stop_reason == "max_tokens"
-    {
+    if runtime_flags.auto_continue_done_tool_check_enabled() && segment.done_marker_found {
         return false;
     }
 
@@ -747,9 +735,6 @@ fn create_sse_stream(
                                     }
                                 }
 
-                                if runtime_flags.auto_continue_enabled() && segment.stop_reason == "max_tokens" && !segment.has_tool_use {
-                                    ctx.set_stop_reason("max_tokens");
-                                }
                                 let final_segment = ctx.auto_continue_segment();
                                 if let Some(last_reason) = stop_reasons.last_mut() {
                                     *last_reason = final_segment.stop_reason.clone();
@@ -1067,12 +1052,6 @@ async fn handle_non_stream_request(
                         "text": aggregated_visible_text
                     })]
                 };
-            }
-            if runtime_flags.auto_continue_enabled()
-                && segment.stop_reason == "max_tokens"
-                && !segment.has_tool_use
-            {
-                stop_reason = "max_tokens".to_string();
             }
             break;
         }
@@ -1582,9 +1561,6 @@ fn create_buffered_sse_stream(
                                     }
                                 }
 
-                                if runtime_flags.auto_continue_enabled() && segment.stop_reason == "max_tokens" && !segment.has_tool_use {
-                                    ctx.set_stop_reason("max_tokens");
-                                }
                                 let final_segment = ctx.auto_continue_segment();
                                 if let Some(last_reason) = stop_reasons.last_mut() { *last_reason = final_segment.stop_reason.clone(); }
                                 let input_tokens = ctx.final_input_tokens();

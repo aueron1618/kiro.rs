@@ -604,7 +604,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const handleUpdateAutoContinue = (updates: {
     enabled?: boolean
-    stopReasonCheckEnabled?: boolean
     doneToolCheckEnabled?: boolean
     maxAttempts?: number
     prompt?: string
@@ -746,19 +745,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
               </div>
               <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <div className="font-medium">stop_reason 判断</div>
-                  <div className="text-sm text-muted-foreground">优先判断 max_tokens / end_turn，只有 max_tokens 才允许续写</div>
-                </div>
-                <Switch
-                  checked={autoContinueData?.stopReasonCheckEnabled ?? true}
-                  disabled={isLoadingAutoContinue || isUpdatingAutoContinue || !(autoContinueData?.enabled ?? true)}
-                  onCheckedChange={(stopReasonCheckEnabled) => handleUpdateAutoContinue({ stopReasonCheckEnabled })}
-                />
-              </div>
-              <div className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
                   <div className="font-medium">结束工具判断</div>
-                  <div className="text-sm text-muted-foreground">当 stop_reason 为 max_tokens 时，再用 auto_continue_done 作为二级结束信号</div>
+                  <div className="text-sm text-muted-foreground">模型调用 auto_continue_done 后停止继续续写</div>
                 </div>
                 <Switch
                   checked={autoContinueData?.doneToolCheckEnabled ?? true}
